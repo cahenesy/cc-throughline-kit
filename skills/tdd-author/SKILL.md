@@ -1,0 +1,106 @@
+---
+name: tdd-author
+description: Reconcile the current PRD against the previous PRD version and the existing TDDs, decide how many Technical Design Docs the change needs and their scope, then author them. Run once per PRD update, in its own session. Invoke with /tdd-author.
+disable-model-invocation: true
+---
+
+# TDD authoring
+
+Run once after a PRD update. YOU decide how many TDDs to write, and their scope,
+based on what changed. Persist each to `docs/tdd/NNNN-<slug>.md`.
+
+## 1. Determine what changed in the PRD
+- Read the current `docs/PRD.md`.
+- Establish the previous version: the `PRD-rev` recorded in the most recent
+  existing TDD's frontmatter. If TDDs exist, run
+  `git diff <that-rev> -- docs/PRD.md` to see exactly what changed since the
+  last design pass. If no TDDs exist, treat the entire PRD as new.
+- If `docs/PRD.md` has uncommitted changes, ask the user to commit it first so
+  the delta is well-defined (or, with consent, diff the working tree vs HEAD).
+
+## 2. Inventory existing coverage
+- Read every `docs/tdd/*.md` and its `PRD refs`. Build the map of which PRD
+  requirements are already covered by a TDD, and by which.
+
+## 3. Decide the set of TDDs (the key judgment)
+From the delta and the coverage map, identify:
+- **New** requirements with no covering TDD  → new TDD(s).
+- **Changed** requirements whose covering TDD is now stale  → flag that TDD for
+  revision, noting what changed; propose an update if warranted.
+- **Unchanged/covered** requirements  → leave alone.
+Group related requirements into coherent units of work — one TDD per unit.
+Decide the count and the scope of each; don't split arbitrarily or lump
+unrelated work together.
+
+Present this PLAN to the user before writing: the TDDs you intend to create
+(scope + which requirements each covers) and any existing TDDs you recommend
+revising. Get approval; adjust as directed.
+
+## 4. Load design constraints
+Read `docs/adr/INDEX.md`. Treat only `accepted` ADRs as binding; pull full ADR
+bodies on demand by relevant Scope. Exclude superseded; note proposed.
+
+## 5. Author the approved set
+Interview the user (AskUserQuestion) on the cross-cutting and per-unit design
+decisions. These features are related — reason about them together so the
+designs stay consistent. CHALLENGE the PRD: surface infeasible, contradictory,
+or under-specified requirements, and any conflict with an accepted ADR, before
+designing around them.
+
+Apply the architecture & dependency dispositions (also in global CLAUDE.md):
+- **Evaluate alternatives before any dependency.** Before putting a library,
+  framework, service, or integration into a TDD, evaluate at least one
+  alternative explicitly — licensing, cost, maintenance posture, lock-in. Prefer
+  OSS/self-hostable for projects branded as such; vendor/subscription-gated deps
+  need deliberate justification, not silent inclusion.
+- **Don't reinvent what an integrated dependency already provides.** Before
+  designing a new abstraction (plugin interface, schema, protocol), check the
+  API surface of the system you're integrating with — it may already exist there.
+
+Write each TDD from the template, numbered sequentially, `Status: draft`. Each
+TDD MUST include a traceability table mapping every PRD requirement in its scope
+(FR/NFR) to the design element that satisfies it, and call out any gaps.
+
+```
+# TDD NNNN: <feature>
+Status: draft | ready | implemented
+PRD refs: <requirement numbers satisfied>
+PRD-rev: <git short SHA of docs/PRD.md at authoring time>
+ADR constraints: <accepted ADR numbers this design respects>
+
+## Approach
+## Components & interfaces
+## Data & state
+## Sequencing / implementation plan
+## Failure modes & edge cases
+## Requirement traceability   (each FR/NFR in scope → design element; note gaps)
+## Dependencies considered    (chosen + alternatives weighed, per disposition)
+## PRD conflicts surfaced (and resolution)
+## Decisions to promote (ADR candidates)
+```
+
+## 6. ADR evaluation (do not skip)
+Evaluate the whole set you just wrote against the existing ADRs and present
+recommendations for approval — analyze, don't merely ask:
+- **New-ADR candidates** — durable, cross-cutting decisions or patterns not yet
+  captured. A pattern shared across several of these related TDDs is a strong
+  candidate.
+- **Supersession candidates** — anything conflicting with or reversing an
+  accepted ADR.
+For each: proposed action, one-line rationale, confidence (mark low-confidence
+"optional"). Keep the bar HIGH; recommend zero if nothing qualifies. On
+approval, invoke `/adr-new` for each.
+
+## 7. Close-out
+Report which TDDs were written (as `draft`) and which existing TDDs you
+recommend revising. Tell the user to set `Status: ready` on the ones to build,
+then run `/implement` (it builds all `ready` TDDs).
+
+## Git (phase gate)
+Unless the user says "skip git":
+- Merge the PRD PR first, then branch `docs/design/<change-slug>` off `main`, so
+  you design against approved requirements. Stamp each TDD's `PRD-rev` with the
+  PRD commit SHA you designed against.
+- Commit the TDD set AND any ADRs promoted this round TOGETHER — ADRs ride in the
+  design PR because they justify decisions made in these TDDs.
+- Open a PR with `gh pr create --fill` (base `main`). Do NOT merge.

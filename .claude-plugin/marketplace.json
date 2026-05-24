@@ -1,0 +1,11 @@
+{
+  "name": "cc-greenfield-kit",
+  "owner": { "name": "Chris Henesy" },
+  "plugins": [
+    {
+      "name": "greenfield",
+      "source": "./",
+      "description": "Greenfield bootstrap kit: project-setup skill, standard subagents, and a format+lint hook."
+    }
+  ]
+}
