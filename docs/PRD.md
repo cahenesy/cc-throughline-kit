@@ -248,6 +248,46 @@ from the PRD forward. throughline owns the *governance* of verification; the
   does not control the run (no pause / resume / cancel). — Acceptance: the view never
   reports 100% before all in-scope TDDs are terminal, and offers no run-control action.
 
+### Build observability & safety boundaries
+Each gate's `claude -p` only redirects its final `end_turn` text to stdout — any
+non-`end_turn` exit (turn cap, external kill, ratelimit, self-pkill) yields a
+near-empty redirected log even after substantial work. And the boundary between
+the build (gate 1) and runtime-verify (gate 3) must be enforced at the prompt
+level: a build claude that tries to drive the artifact and clean up child
+processes can kill its own parent. These requirements codify those properties.
+
+- **FR-36 Gate-log session pointer.** After every `claude -p` invocation made by
+  `/implement` (build, review, runtime-verify), the runner appends to the per-TDD
+  gate log a `THROUGHLINE_SESSION: <path>` line pointing at the full session
+  JSONL (under `~/.claude/projects/<encoded-cwd>/`) plus a tail of up to five
+  recent assistant tool calls (name + first ~140 chars of input). Without this,
+  a turn-cap or self-kill produces the cryptic `FAIL (no BATCH_RESULT; see log)`
+  with no actionable evidence — the redirected log is empty because `-p` only
+  prints the final assistant message and a non-`end_turn` exit emits none. —
+  Acceptance: after any `/implement` gate completes (PASS, FAIL, BLOCKED, or
+  SKIP), the per-TDD log contains exactly one `THROUGHLINE_SESSION:` line per
+  gate that ran, and the path resolves to an existing readable JSONL file.
+- **FR-37 Build-phase boundaries.** The build prompt explicitly forbids the
+  build claude from (a) spawning nested `claude` processes, (b) using
+  pattern-based process killing (`pkill`, `killall`, `pgrep | xargs kill`), or
+  (c) creating runtime-driving fixtures outside the repo (e.g. in `/tmp/`).
+  These activities belong to the runtime-verify gate (FR-25), which runs as a
+  separate process AFTER the build returns. Mixing them into the build risks
+  the build claude killing its own parent: a pattern broad enough to clean up
+  child processes is broad enough to match the runner's `claude -p`. —
+  Acceptance: the build prompt shipped with the plugin enumerates these three
+  prohibitions with rationale; for any preserved build session JSONL, no `Bash`
+  tool call invokes `claude`, `pkill`, `killall`, or `pgrep`, and the build
+  leaves no fixtures rooted in `/tmp/` or other out-of-repo paths.
+- **FR-38 Cleanup safety in runtime-verify.** The runtime-verify gate (FR-25)
+  IS allowed to spawn processes to drive the artifact, but its prompt mandates
+  tracked-PID cleanup: child processes must be tracked from `$!` and killed by
+  PID, never by pattern (`pkill -f`, `killall`). Same parent-self-kill trap as
+  FR-37, same fix. — Acceptance: the runtime-verify prompt shipped with the
+  plugin enumerates this constraint and prescribes `$!`-based PID tracking as
+  the only sanctioned cleanup; for any preserved runtime-verify session JSONL,
+  no `Bash` tool call uses `pkill` or `killall`.
+
 ### Quality hook & delegation
 - **FR-21 Format + lint hook.** A `format-and-lint` PostToolUse hook formats then
   lints edited files when a linter is configured (no-op otherwise), debounced, for
@@ -303,6 +343,17 @@ from the PRD forward. throughline owns the *governance* of verification; the
   records what was applied, not what is currently present on disk; FR-34's local
   notice is driven by release metadata (FR-35), not by introspecting the developer's
   machine.
+- **Sandbox- or static-analysis-enforced gate boundaries** — throughline relies on
+  prompt-level instruction (FR-37, FR-38) to constrain claude's behavior in the build
+  and runtime-verify gates; it does NOT sandbox the build's shell, filter its tool
+  calls, or sit in front of process invocations with policy. A misbehaving build is
+  caught by the four-gate system's downstream effects (its session JSONL is visible
+  via FR-36, its commits are inspectable, the gates ultimately decide pass/fail) —
+  not by pre-execution policing.
+- **Inlining the full session JSONL into the per-TDD log** — FR-36 attaches a pointer
+  plus a short tool-call tail. The full transcript (often hundreds of KB to several
+  MB per gate) stays in `~/.claude/projects/...` for inspection; inlining it would
+  bloat the log without aiding triage.
 
 ## Constraints & assumptions
 
@@ -329,6 +380,15 @@ from the PRD forward. throughline owns the *governance* of verification; the
 - The per-developer local marker's `<repo-id>` (FR-33) is derived deterministically
   from the repo's remote URL when present, falling back to its absolute path; repos
   moved on disk without a remote produce a fresh marker (no migration is performed).
+- The gate-log session pointer (FR-36) relies on Claude Code's project-directory
+  encoding scheme (`/path/with/slashes` → `~/.claude/projects/-path-with-slashes/`).
+  A change to that scheme upstream would require updating the runner's lookup; if
+  the encoded directory does not exist (e.g. the very first `claude -p` for a fresh
+  cwd before claude writes its session file), the helper silently no-ops rather
+  than failing the gate.
+- The tool-call tail rendered into the gate log (FR-36) requires `jq` on PATH;
+  without it, only the `THROUGHLINE_SESSION:` pointer is written and the user can
+  inspect the JSONL manually. The runner does not vendor `jq`.
 
 ## Open questions
 
