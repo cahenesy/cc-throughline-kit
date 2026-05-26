@@ -301,4 +301,15 @@ PASS="$(grep -c '^ok$'   "$RESULTS" 2>/dev/null)"; PASS="${PASS:-0}"
 FAIL="$(grep -c '^fail$' "$RESULTS" 2>/dev/null)"; FAIL="${FAIL:-0}"
 rm -f "$RESULTS"
 echo "=== gate eval: $PASS passed, $FAIL failed ==="
-[ "$FAIL" -eq 0 ]
+
+# Run the run-progress-visibility eval (TDD 0008 / FR-27..FR-30) as part of the
+# same suite — VERIFY_TEST_CMD points at this file only, and the progress-record
+# + status-renderer evals are runner-adjacent quality gates that belong here.
+RPV="$(dirname "$0")/run-progress-visibility.test.sh"
+RPV_FAIL=0
+if [ -f "$RPV" ]; then
+  echo
+  bash "$RPV" || RPV_FAIL=1
+fi
+
+[ "$FAIL" -eq 0 ] && [ "$RPV_FAIL" -eq 0 ]
