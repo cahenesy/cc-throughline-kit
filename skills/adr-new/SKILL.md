@@ -6,8 +6,8 @@ description: Create a new Architecture Decision Record with append-only, status-
 # New ADR
 
 Record a durable architectural decision or established pattern. ADRs are the
-sparse, forward-feeding memory loaded into every future TDD — keep the bar high
-and the set small.
+sparse, forward-feeding memory loaded into every future call to /tdd-author
+so keep the bar high and the set small.
 
 ## Rules — enforce strictly
 
