@@ -8,7 +8,8 @@ disable-model-invocation: true
 
 Produce or update `docs/PRD.md` — the product intent of record. The PRD is the
 WHAT and WHY. It contains no HOW: no architecture, no tech choices, no
-implementation detail (those belong in a TDD).
+implementation detail (those belong in a TDD). Keep it the WHAT. The HOW is
+`/tdd-author`'s job. Do not start designing.
 
 Run this in its own session. If `docs/PRD.md` already exists you are UPDATING
 it — read it first and preserve requirements still valid; note what changed.
@@ -53,8 +54,7 @@ After writing the PRD, reread it with fresh eyes and fix issues inline:
 - **Ambiguity** — could a requirement be read two different ways? Pick one and make
   it explicit; an untestable requirement is not done.
 
-Fix and move on (no re-review loop). Then offer the PRD for the user's read before
-opening the PR.
+Fix and move on (no re-review loop) then commit and open the PR.
 
 ## Template
 
@@ -68,8 +68,6 @@ opening the PR.
 ## Constraints & assumptions
 ## Open questions
 ```
-
-Keep it the WHAT. The HOW is `/tdd-author`'s job. Do not start designing.
 
 ## Git (phase gate)
 Unless the user says "skip git":
