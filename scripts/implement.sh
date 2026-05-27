@@ -404,6 +404,55 @@ set_tdd_meta() {
     "$paused_cause" "$gates_csv" "$retries_json" "$branch_head"
 }
 
+# --- recoverable-cause classification (TDD 0011 / FR-41) ----------------------
+# A small allowlist + exit-signal table that maps a gate's `claude -p` failure
+# to one of: ratelimit, usage-limit, transient, fatal. Stdout determines
+# routing; an unmatched stderr buffer falls through to `fatal` (NFR-4 honesty —
+# ambiguity is never a false paused). Cases are matched left-to-right; first
+# match wins. Pattern source lives inline (single call site; auditability
+# matters more than reuse).
+_recoverable_patterns() {
+  # Echoes one "cause:regex" pair per line. The classifier walks this list in
+  # order and applies grep -aiE; first hit wins. Patterns are
+  # case-insensitive — claude / network errors arrive in mixed casing.
+  cat <<'PATTERNS'
+ratelimit:(ratelimit|rate_limit|429 |too[- ]many[- ]requests)
+usage-limit:(usage[- ]limit|monthly[- ]limit[- ]reached|quota[- ]exceeded)
+transient:(connection[- ]reset|timed[- ]out|EAI_AGAIN|temporary failure|503 |502 |504 |gateway timeout)
+PATTERNS
+}
+
+# _classify_cause <log> <exit_status>  -> echoes one of
+#     ratelimit | usage-limit | transient | fatal
+# Inspects:
+#   - the redirected log's tail (claude prints recoverable error messages
+#     before a non-`end_turn` exit), and
+#   - the wait-status signal — SIGTERM (143) is `transient` (host shutdown,
+#     orderly kill); SIGKILL (137) is `fatal` (we cannot prove it was not a
+#     runaway-process kill).
+_classify_cause() {
+  local log="$1" rc="$2" line pat cause
+  # Signal-based decision first: a SIGTERM is a recoverable shutdown signal;
+  # a SIGKILL is unrecoverable (out-of-memory, deliberate hard kill, …) and
+  # must NEVER promote to paused (NFR-4).
+  case "$rc" in
+    137) printf 'fatal\n';     return 0 ;;
+    143) printf 'transient\n'; return 0 ;;
+  esac
+  # Pattern-based stderr classification. Last ~2KB of log is the tail.
+  if [ -s "$log" ]; then
+    local tail
+    tail="$(tail -c 4096 "$log" 2>/dev/null)"
+    while IFS=':' read -r cause pat; do
+      [ -z "$cause" ] && continue
+      if printf '%s' "$tail" | grep -aiqE "$pat"; then
+        printf '%s\n' "$cause"; return 0
+      fi
+    done < <(_recoverable_patterns)
+  fi
+  printf 'fatal\n'
+}
+
 # --- per-TDD primitives (cwd = the repo or worktree they run in) ---------------
 # record_session_pointer: `claude -p` redirects only its FINAL assistant message
 # (the `end_turn` text) to stdout. If a run ends without `end_turn` — turn cap,
