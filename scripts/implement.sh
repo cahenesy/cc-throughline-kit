@@ -453,6 +453,132 @@ _classify_cause() {
   printf 'fatal\n'
 }
 
+# _enter_paused <slug> <cause> [<gate-name>] [<log>]
+# Promote the in-flight TDD to status=paused (TDD 0011 / FR-41). Preserves the
+# current stage so resume knows where to re-enter; captures the build branch's
+# HEAD at pause time into branch_head_at_pause (used by _resume_from to detect
+# divergence). The run-level fragment is re-rolled so the rollup reflects ≥1
+# paused TDD. The caller exits cleanly so the detached process terminates
+# without producing a FAIL verdict.
+_enter_paused() {
+  local slug="$1" cause="$2" gate_name="${3:-}" log="${4:-}"
+  local f="${STATE_DIR:-}/$slug.json"
+  [ -n "$STATE_DIR" ] && [ -f "$f" ] || return 0
+  # Preserve everything from the existing fragment; only mutate status,
+  # paused_cause, and branch_head_at_pause.
+  local n qp path stage sta branch pr_url log_f note
+  local gates_csv retries_json now branch_head_now
+  n="$(sed -n 's/.*"n":\([0-9]*\).*/\1/p'            "$f" | head -1)"
+  qp="$(sed -n 's/.*"queue_pos":\([0-9]*\).*/\1/p'   "$f" | head -1)"
+  path="$(sed -n 's/.*"path":"\([^"]*\)".*/\1/p'     "$f" | head -1)"
+  if grep -q '"stage":null' "$f" 2>/dev/null; then stage=""
+  else stage="$(sed -n 's/.*"stage":"\([^"]*\)".*/\1/p' "$f" | head -1)"; fi
+  sta="$(sed -n 's/.*"started_at":\([0-9]*\).*/\1/p' "$f" | head -1)"
+  branch="$(sed -n 's/.*"branch":"\([^"]*\)".*/\1/p' "$f" | head -1)"
+  pr_url="$(sed -n 's/.*"pr_url":"\([^"]*\)".*/\1/p' "$f" | head -1)"
+  log_f="$(sed -n 's/.*"log":"\([^"]*\)".*/\1/p'     "$f" | head -1)"
+  note="$(sed -n 's/.*"note":"\([^"]*\)".*/\1/p'     "$f" | head -1)"
+  gates_csv="$(_read_fragment_array_csv "$f" gates_completed)"
+  retries_json="$(_read_fragment_raw_array "$f" retries)"
+  # Capture the build branch HEAD so resume can detect divergence (TDD 0011
+  # failure mode: "Build branch HEAD differs at resume from what gates saw").
+  branch_head_now="$(git rev-parse --verify HEAD 2>/dev/null || true)"
+  now=$(date +%s)
+  _write_tdd_fragment "$slug" "${n:-0}" "$path" "${qp:-0}" paused "$stage" \
+    "${sta:-$now}" "$now" "$branch" "$pr_url" "$log_f" "${note:-paused ($cause)}" \
+    "$cause" "$gates_csv" "$retries_json" "$branch_head_now"
+  _write_run_fragment paused
+  # Best-effort: append a marker to the per-TDD log so a future operator
+  # has a clear timestamped paused entry above the resume timestamp.
+  if [ -n "$log" ] && [ -w "$(dirname "$log")" ] 2>/dev/null; then
+    printf '\nTHROUGHLINE_PAUSED: slug=%s cause=%s gate=%s ts=%d\n' \
+      "$slug" "$cause" "${gate_name:-}" "$now" >> "$log"
+  fi
+}
+
+# _retry_in_gate <gate-fn> <gate-name> <slug> <log> <args...>
+# (TDD 0011 / FR-42) — wrap one of the LLM gate calls with bounded
+# transient-error retry. Algorithm:
+#   for attempt in 1..MAX_RETRIES:
+#     run gate-fn "$@"
+#     if rc==0:           return 0 (success; gate may proceed)
+#     classify the log + rc:
+#       cause=fatal → return 1 (fail; do NOT retry; gate halts)
+#       cause=ratelimit/usage-limit/transient → record retry, sleep backoff
+#   exhausted → _enter_paused; return 2 (caller maps rc=2 to "paused, not
+#   flipped", distinct from rc=1 "failed")
+# Env knobs: THROUGHLINE_GATE_RETRIES (default 3), THROUGHLINE_GATE_BACKOFF_BASE
+# (default 30s). Backoff schedule: BASE * 4^(attempt-1) ⇒ 30, 120, 480s.
+_retry_in_gate() {
+  local gate_fn="$1" gate_name="$2" slug="$3" log="$4"; shift 4
+  local max_retries="${THROUGHLINE_GATE_RETRIES:-3}"
+  local backoff_base="${THROUGHLINE_GATE_BACKOFF_BASE:-30}"
+  local attempt cause rc backoff
+  for (( attempt=1; attempt<=max_retries; attempt++ )); do
+    "$gate_fn" "$@"
+    rc=$?
+    if [ "$rc" -eq 0 ]; then return 0; fi
+    cause="$(_classify_cause "$log" "$rc")"
+    if [ "$cause" = "fatal" ]; then return 1; fi
+    # Recoverable. Record this retry attempt into the fragment's retries[]
+    # audit before sleeping; backoff_s is the *upcoming* sleep, which is 0
+    # on the final iteration since we are about to promote to paused.
+    if [ "$attempt" -ge "$max_retries" ]; then backoff=0
+    else backoff=$(( backoff_base * (4 ** (attempt - 1)) )); fi
+    _append_retry "$slug" "$gate_name" "$attempt" "$backoff"
+    if [ "$attempt" -ge "$max_retries" ]; then
+      _enter_paused "$slug" "$cause" "$gate_name" "$log"
+      return 2
+    fi
+    [ "$backoff" -gt 0 ] && sleep "$backoff"
+  done
+  # Defensive: loop should always return inside; if we get here, treat as
+  # paused (NFR-4 — never silently lose state).
+  _enter_paused "$slug" "${cause:-transient}" "$gate_name" "$log"
+  return 2
+}
+
+# _append_retry <slug> <gate-name> <count> <backoff_s>
+# Append one retry record to the per-TDD fragment's retries[] array. Used
+# only by _retry_in_gate. Reads the existing fragment, splices a new entry
+# into retries[], and rewrites via _write_tdd_fragment so every other field
+# is round-tripped unchanged.
+_append_retry() {
+  local slug="$1" gate_name="$2" count="$3" backoff="$4"
+  local f="${STATE_DIR:-}/$slug.json"
+  [ -n "$STATE_DIR" ] && [ -f "$f" ] || return 0
+  local n qp path status stage sta upd branch pr_url log_f note
+  local paused_cause gates_csv retries_json branch_head
+  n="$(sed -n 's/.*"n":\([0-9]*\).*/\1/p'            "$f" | head -1)"
+  qp="$(sed -n 's/.*"queue_pos":\([0-9]*\).*/\1/p'   "$f" | head -1)"
+  path="$(sed -n 's/.*"path":"\([^"]*\)".*/\1/p'     "$f" | head -1)"
+  status="$(sed -n 's/.*"status":"\([^"]*\)".*/\1/p' "$f" | head -1)"
+  if grep -q '"stage":null' "$f" 2>/dev/null; then stage=""
+  else stage="$(sed -n 's/.*"stage":"\([^"]*\)".*/\1/p' "$f" | head -1)"; fi
+  sta="$(sed -n 's/.*"started_at":\([0-9]*\).*/\1/p' "$f" | head -1)"
+  upd="$(sed -n 's/.*"updated_at":\([0-9]*\).*/\1/p' "$f" | head -1)"
+  branch="$(sed -n 's/.*"branch":"\([^"]*\)".*/\1/p' "$f" | head -1)"
+  pr_url="$(sed -n 's/.*"pr_url":"\([^"]*\)".*/\1/p' "$f" | head -1)"
+  log_f="$(sed -n 's/.*"log":"\([^"]*\)".*/\1/p'     "$f" | head -1)"
+  note="$(sed -n 's/.*"note":"\([^"]*\)".*/\1/p'     "$f" | head -1)"
+  paused_cause="$(_read_fragment_field "$f" paused_cause)"
+  gates_csv="$(_read_fragment_array_csv "$f" gates_completed)"
+  retries_json="$(_read_fragment_raw_array "$f" retries)"
+  branch_head="$(_read_fragment_field "$f" branch_head_at_pause)"
+  local entry new
+  entry="{\"gate\":\"$(json_escape "$gate_name")\",\"count\":$count,\"backoff_s\":$backoff}"
+  if [ -z "$retries_json" ] || [ "$retries_json" = "[]" ]; then
+    new="[$entry]"
+  else
+    # Splice before the closing bracket. The retries entries are flat
+    # objects with no nested brackets, so this is unambiguous.
+    new="${retries_json%]},$entry]"
+  fi
+  _write_tdd_fragment "$slug" "${n:-0}" "$path" "${qp:-0}" "$status" "$stage" \
+    "${sta:-$(date +%s)}" "$(date +%s)" "$branch" "$pr_url" "$log_f" "$note" \
+    "$paused_cause" "$gates_csv" "$new" "$branch_head"
+}
+
 # --- per-TDD primitives (cwd = the repo or worktree they run in) ---------------
 # record_session_pointer: `claude -p` redirects only its FINAL assistant message
 # (the `end_turn` text) to stdout. If a run ends without `end_turn` — turn cap,
