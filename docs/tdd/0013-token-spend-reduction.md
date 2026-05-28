@@ -389,9 +389,12 @@ disjoint surfaces.
    (stdout is the sole findings channel — stderr stays clean unless the
    script itself encounters a runtime error such as a missing input file).
 2. **FR-51 pre-pass passes clean on a well-formed TDD.** Run
-   `bash scripts/lib/tdd-lint.sh docs/tdd/0007-verification-as-observation.md`
-   (a known-clean implemented TDD). Observe: exit code 0; stdout empty
-   (or contains only `nit`-severity findings).
+   `bash scripts/lib/tdd-lint.sh docs/tdd/0008-run-progress-visibility.md`
+   (a known-clean implemented TDD; 0007 is unsuitable because its prose
+   quotes the forbidden phrase `verify it works` outside a code fence —
+   the lint's `<TBD>` / fenced-block silencers do not cover inline
+   backticks or quoted prose, by deliberate spec). Observe: exit code 0;
+   stdout empty (or contains only `nit`-severity findings).
 3. **FR-51 placeholder lint distinguishes prose-TBD from
    fenced-TBD.** Run on a fixture containing both. Observe: only
    the prose-TBD line appears as a `major` finding; the fenced
