@@ -1,6 +1,6 @@
 # TDD 0013: Token-spend reduction — mechanical pre-checks + verification-gate model tiering
 
-Status: draft
+Status: implemented
 PRD refs: FR-51, FR-52 (new)
 PRD-rev: d766d2d
 ADR constraints: 0003, 0004, 0005
