@@ -421,8 +421,13 @@ state_init() {
     # force a fresh-start.
     local _resume_schema
     _resume_schema="$(sed -n 's/.*"schema":\([0-9]*\).*/\1/p' "$STATE_DIR/run.json" | head -1)"
-    if [ -n "$_resume_schema" ] && [ "$_resume_schema" != "1" ]; then
-      echo "paused-run schema $_resume_schema not compatible with this plugin version; resume not possible (see docs/tdd/0011)" | tee -a "$REPORT" >&2
+    # TDD 0011 / iter-6 MAJOR-3: an absent/empty schema field is NOT
+    # schema 1 — it's an unknown / truncated state record, which per
+    # TDD §schema-version-policy must refuse to resume. The previous
+    # `[ -n "$x" ] && [ "$x" != "1" ]` short-circuited the refusal on
+    # empty input.
+    if [ -z "$_resume_schema" ] || [ "$_resume_schema" != "1" ]; then
+      echo "paused-run schema '${_resume_schema:-missing}' not compatible with this plugin version; resume not possible (see docs/tdd/0011)" | tee -a "$REPORT" >&2
       exit 1
     fi
     STATE_STARTED_AT="$(sed -n 's/.*"started_at":\([0-9]*\).*/\1/p' "$STATE_DIR/run.json" | head -1)"
@@ -486,7 +491,14 @@ state_init() {
       ln -sfn "$(basename "$LOGDIR")" "$MAINREPO/docs/tdd/.implement-logs/latest" 2>/dev/null || true
       exit 0
     fi
-    _write_run_fragment running   # flip back to running for the resumed work
+    # TDD 0011 / iter-6 MAJOR-2: guard the main resume-path's run.json
+    # flip. The two early-exit paths above already check; this one was
+    # the silent gap. A disk-full here would otherwise leave run.json
+    # at `paused` for the entire resumed run, and again at run-end
+    # (the same disk-full prevents the final `done` write), permanently
+    # confusing status.sh.
+    _write_run_fragment running \
+      || { echo "FATAL: state_init resume could not write run.json (running state)" | tee -a "$REPORT" >&2; exit 1; }
     ln -sfn "$(basename "$LOGDIR")" "$MAINREPO/docs/tdd/.implement-logs/latest" 2>/dev/null || true
     return 0
   fi
@@ -1162,7 +1174,12 @@ _resume_from() {
       # affirmative based on the wider ancestry scan (the prior
       # warning-and-pass behavior).
       echo "warning: _resume_from $slug — no merge-base with ${integration:-<unset>}; refusing to claim gate 1 done on degraded evidence" >&2
-      _update_paused_cause "$slug" "resume-blocked-build-state-missing" || true
+      # TDD 0011 / iter-6 MAJOR-4: do NOT `|| true` here — that would
+      # swallow a fragment-write failure and let the driver's report
+      # read back a stale paused_cause (e.g. "ratelimit") instead of
+      # the resume-blocked diagnostic.
+      _update_paused_cause "$slug" "resume-blocked-build-state-missing" \
+        || echo "warning: _resume_from $slug: could not update paused_cause (status.sh may show stale cause)" >&2
       return 3
     fi
   fi
@@ -1173,7 +1190,9 @@ _resume_from() {
     # halt this TDD without falling through to gate_one (which would
     # silently overwrite paused→building). All callers (parallel /
     # sequential / combined) MUST check $? and skip gate_one on rc=3.
-    _update_paused_cause "$slug" "resume-blocked-build-state-missing" || true
+    # TDD 0011 / iter-6 MAJOR-4: surface fragment-write failures.
+    _update_paused_cause "$slug" "resume-blocked-build-state-missing" \
+      || echo "warning: _resume_from $slug: could not update paused_cause (status.sh may show stale cause)" >&2
     return 3
   fi
 
@@ -1187,7 +1206,9 @@ _resume_from() {
     local current_head
     current_head="$(git rev-parse --verify "refs/heads/$branch" 2>/dev/null || true)"
     if [ -n "$current_head" ] && [ "$current_head" != "$branch_head_at_pause" ]; then
-      _update_paused_cause "$slug" "resume-blocked-branch-divergence" || true
+      # TDD 0011 / iter-6 MAJOR-4: surface fragment-write failures.
+      _update_paused_cause "$slug" "resume-blocked-branch-divergence" \
+        || echo "warning: _resume_from $slug: could not update paused_cause (status.sh may show stale cause)" >&2
       return 3   # see BLOCKER-2
     fi
   fi
@@ -1222,7 +1243,7 @@ _resume_from() {
 # skips those gates. Each successfully-completed gate is recorded into
 # gates_completed via set_tdd_state's 5th param (TDD 0011 / FR-40).
 gate_one() {  # <tdd> <review-base-ref> <log>
-  local tdd="$1" rbase="$2" log="$3" bs rs rvs slug rrc
+  local tdd="$1" rbase="$2" log="$3" bs rs rvs slug rrc _retries_json=""
   slug="$(basename "$tdd" .md)"
   # TDD 0011 / MA-4 belt-and-suspenders: refuse to process a slug whose state
   # fragment is missing. state_init's queue-freeze should have dropped any
@@ -1255,6 +1276,18 @@ gate_one() {  # <tdd> <review-base-ref> <log>
     # review gates already follow the same ordering.
     if [ "$rrc" -eq 2 ]; then
       echo "PAUSED build (see paused_cause in run state)"; return 2; fi
+    # TDD 0011 / iter-6 MAJOR-1: when retries occurred, the cumulative
+    # log may carry stale verdict lines from prior transient attempts.
+    # If `_retry_in_gate` classified the latest attempt fatal AND retries
+    # happened, do NOT consult the log's verdict (tail -1 would surface
+    # an old BLOCKED from attempt 1 and corrupt BLOCKERS.md). Without
+    # retries, the log's latest verdict IS the only verdict and can be
+    # trusted. Use the fragment's retries[] count as the proxy.
+    _retries_json="$(_read_fragment_raw_array "${STATE_DIR:-}/$slug.json" retries 2>/dev/null)"
+    if [ "$rrc" -ne 0 ] && [ -n "$_retries_json" ] && [ "$_retries_json" != "[]" ]; then
+      set_tdd_state "$slug" failed "" "build gate fatal exit after retries (rc=$rrc)"
+      echo "FAIL build (fatal exit after retries; see log)"; return 1
+    fi
     bs="$(build_status "$log")"
     case "$bs" in
       *BLOCKED*) record_blocker "$tdd" "${bs#*BLOCKED}"
@@ -1295,6 +1328,14 @@ gate_one() {  # <tdd> <review-base-ref> <log>
     # failure as status=blocked, violating NFR-4 verdict honesty.
     if [ "$rrc" -eq 2 ]; then
       echo "PAUSED runtime-verify"; return 2; fi
+    # TDD 0011 / iter-6 MAJOR-1: only bypass log-verdict scan when retries
+    # occurred (cumulative log may carry stale entries). Same proxy as
+    # gate 1.
+    _retries_json="$(_read_fragment_raw_array "${STATE_DIR:-}/$slug.json" retries 2>/dev/null)"
+    if [ "$rrc" -ne 0 ] && [ -n "$_retries_json" ] && [ "$_retries_json" != "[]" ]; then
+      set_tdd_state "$slug" failed "" "runtime-verify gate fatal exit after retries (rc=$rrc)"
+      echo "FAIL runtime-verify (fatal exit after retries; see log)"; return 1
+    fi
     rvs="$(verify_runtime_status "$log")"
     case "$rvs" in
       *PASS*|*SKIP*) set_tdd_state "$slug" verifying verify-runtime "" verify-runtime ;;
@@ -1316,6 +1357,12 @@ gate_one() {  # <tdd> <review-base-ref> <log>
     # gate 3 above + BL-1).
     if [ "$rrc" -eq 2 ]; then
       echo "PAUSED review"; return 2; fi
+    # TDD 0011 / iter-6 MAJOR-1: same retries-proxy as gates 1 and 3.
+    _retries_json="$(_read_fragment_raw_array "${STATE_DIR:-}/$slug.json" retries 2>/dev/null)"
+    if [ "$rrc" -ne 0 ] && [ -n "$_retries_json" ] && [ "$_retries_json" != "[]" ]; then
+      set_tdd_state "$slug" failed "" "review gate fatal exit after retries (rc=$rrc)"
+      echo "FAIL review (fatal exit after retries; see log)"; return 1
+    fi
     rs="$(review_status "$log")"
     case "$rs" in
       *PASS*) set_tdd_state "$slug" reviewing review "" review ;;

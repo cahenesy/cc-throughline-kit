@@ -487,10 +487,33 @@ echo "[7.a] state_init refuses to resume across an incompatible schema"
     LOGDIR="$TMP"; STATE_DIR="$STATE_D"; RESUME=1; REPORT="$TMP/report.md"; TDDS=()
     state_init >"$OUT" 2>"$ERR"
   ) ; rc=$?
-  if [ "$rc" -ne 0 ] && grep -q 'paused-run schema 2 not compatible' "$OUT" "$ERR" 2>/dev/null; then
+  if [ "$rc" -ne 0 ] && grep -qE "paused-run schema '?2'? not compatible" "$OUT" "$ERR" 2>/dev/null; then
     ok "schema=2 paused run is refused with the spec'd message + non-zero exit"
   else
     bad "schema=2 should refuse resume with TDD 0011 §schema-version policy message (rc=$rc, out=$(cat "$OUT" "$ERR" 2>/dev/null | head -1))"
+  fi
+  rm -rf "$TMP"
+) || true
+
+# --- iter-6 MAJOR-3: empty/absent schema also refuses (a missing schema is NOT schema 1) ---
+echo "[7.b] state_init refuses to resume when run.json has no schema field"
+( cd "$REPO"
+  TMP="$(mktemp -d)"
+  STATE_D="$TMP/state.d"
+  mkdir -p "$STATE_D"
+  # run.json WITHOUT a schema field (e.g., truncated state record).
+  printf '{"started_at":1,"updated_at":1,"pid":0,"integration_branch":"master","mode":"sequential","change":"x","logdir":"%s","total":0,"completed":0,"failed":0,"blocked":0,"skipped":0,"paused":0,"state":"paused","pause_started_at":1}\n' "$TMP" > "$STATE_D/run.json"
+  OUT="$TMP/out"; ERR="$TMP/err"
+  ( export THROUGHLINE_SOURCE_ONLY=1
+    # shellcheck disable=SC1090
+    source "$REPO/scripts/implement.sh"
+    LOGDIR="$TMP"; STATE_DIR="$STATE_D"; RESUME=1; REPORT="$TMP/report.md"; TDDS=()
+    state_init >"$OUT" 2>"$ERR"
+  ) ; rc=$?
+  if [ "$rc" -ne 0 ] && grep -qE "paused-run schema '?(missing|)'? not compatible" "$OUT" "$ERR" 2>/dev/null; then
+    ok "empty-schema paused run is refused"
+  else
+    bad "empty schema should refuse (rc=$rc, out=$(cat "$OUT" "$ERR" 2>/dev/null | head -1))"
   fi
   rm -rf "$TMP"
 ) || true
