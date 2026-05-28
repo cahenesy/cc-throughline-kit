@@ -383,6 +383,163 @@ EOF3
   cd "$REPO"; rm -rf "$TMPROOT"
 )
 
+# --- Second review pass: deeper awk-rc + boundary findings (BL/MAJ from review 2)
+# The first re-review pass surfaced 2 blockers + 4 majors of the same NFR-4 bug
+# class: unchecked awk / pipeline exit codes that map a crash to a clean caller
+# answer. Each test below pins one of those down before its corresponding fix.
+
+echo "[lint-B1B2] tl_lint_structural surfaces awk crash as rc=2 (BL-1 + BL-2)"
+(
+  # Pre-fix: both `has_rows=\$(awk ...)` (traceability check) and
+  # `empty_out=\$(awk ...)` (section.empty check) ignore awk's exit code.
+  # An awk crash leaves the captured variable empty, the [ -z / -n ]
+  # check evaluates as "no rows" / "no findings", and the function
+  # returns rc=0 (clean) or a false-positive blocker. Either way the
+  # caller is lied to. The fix must surface non-zero awk exit codes
+  # from EITHER awk invocation as rc=2 (blocker).
+  TMP="$(mktemp -d)"
+  cat > "$TMP/awk" <<'EOF2'
+#!/usr/bin/env bash
+exit 3
+EOF2
+  chmod +x "$TMP/awk"
+  export PATH="$TMP:$PATH"
+  source "$LINT"
+  err="$(tl_lint_structural "$FIX/clean.md" 2>&1 >/dev/null)"; rc=$?
+  unset -f tl_lint_structural tl_lint_placeholders tl_lint_traced tl_lint_all _tl_emit 2>/dev/null
+  rm -rf "$TMP"
+  expect_exit 2 "$rc" "tl_lint_structural rc=2 on awk crash"
+  printf '%s\n' "$err" | grep -qi 'awk' \
+    && ok "stderr names awk failure" \
+    || bad "expected stderr to mention awk crash (got: $err)"
+)
+
+echo "[lint-M2pipe] tl_lint_traced surfaces awk pipeline crash as rc=2 (MAJ-2)"
+(
+  # Pre-fix: `ids_in_table="\$(awk ... | grep ... | sort -u)"` ignores the
+  # pipeline's exit status. An awk crash → empty ids_in_table → every FR
+  # in `PRD refs` is "missing from table" → all FRs falsely flagged
+  # untraced. The fix must propagate pipeline failures as rc=2.
+  TMP="$(mktemp -d)"
+  cat > "$TMP/awk" <<'EOF2'
+#!/usr/bin/env bash
+exit 3
+EOF2
+  chmod +x "$TMP/awk"
+  export PATH="$TMP:$PATH"
+  source "$LINT"
+  err="$(tl_lint_traced "$FIX/clean.md" 2>&1 >/dev/null)"; rc=$?
+  unset -f tl_lint_structural tl_lint_placeholders tl_lint_traced tl_lint_all _tl_emit 2>/dev/null
+  rm -rf "$TMP"
+  expect_exit 2 "$rc" "tl_lint_traced rc=2 on awk pipeline crash"
+  printf '%s\n' "$err" | grep -qi 'awk' \
+    && ok "stderr names awk failure" \
+    || bad "expected stderr to mention awk crash (got: $err)"
+)
+
+echo "[cls-Mawk] tl_classify_plan surfaces awk crash as non-zero rc (MAJ-3)"
+(
+  # Pre-fix: `body="\$(awk ... | tr ...)"` ignores awk's exit code. A
+  # crashed awk → empty body → the bare `nontrivial` default at the end
+  # of the function (echoed via the conservative fallback) returns rc=0
+  # (clean), which the runner's M3 fix interprets as a genuine
+  # nontrivial classification — bypassing the "(classifier failed, ...)"
+  # note. The fix must propagate non-zero awk exit as a non-zero rc out
+  # of tl_classify_plan so the runner can see the failure.
+  TMP="$(mktemp -d)"
+  cat > "$TMP/awk" <<'EOF2'
+#!/usr/bin/env bash
+exit 3
+EOF2
+  chmod +x "$TMP/awk"
+  export PATH="$TMP:$PATH"
+  source "$CLS"
+  out="$(tl_classify_plan "$FIX/clean.md" 2>/dev/null)"; rc=$?
+  unset -f tl_classify_plan 2>/dev/null
+  rm -rf "$TMP"
+  if [ "$rc" -eq 0 ]; then
+    bad "tl_classify_plan returned rc=0 despite awk crash (got out='$out')"
+  else
+    ok "tl_classify_plan returned non-zero rc on awk crash (rc=$rc)"
+  fi
+)
+
+echo "[cls-Mui] UI regex matches punctuation forms (UI? / UI)) (MAJ-1)"
+(
+  # The plan body intentionally MIXES the nontrivial trigger `UI?` with a
+  # mechanical trigger `exit code`. Pre-fix: the UI regex
+  # `(^| )ui( |$|[.,:;])` doesn't include `?` / `)` in its boundary
+  # character class, so `UI?` doesn't match → nontrivial check fails →
+  # mechanical check fires (because of `exit code`) → returns mechanical.
+  # That's a UI-bearing plan misclassified as mechanical and sent to
+  # sonnet, defeating the gate-strength tiering for UI verification.
+  # Post-fix (extended boundary class): `UI?` matches → nontrivial wins.
+  TMP="$(mktemp -d)"
+  cat > "$TMP/ui-question.md" <<'EOF3'
+# TDD
+Status: draft
+PRD refs: FR-99
+PRD-rev: dead
+ADR constraints: none
+## Approach
+x
+## Verification plan
+Run the CLI, observe exit code 0. Then click the UI? Confirm the modal
+closes (the visible UI).
+## Requirement traceability
+| FR | x |
+|---|---|
+| FR-99 | x |
+## Dependencies considered
+None.
+EOF3
+  out="$(bash "$CLS" "$TMP/ui-question.md")"
+  rm -rf "$TMP"
+  printf '%s\n' "$out" | awk '{print $1}' | grep -q 'nontrivial' \
+    && ok "UI? + UI) prose classifies nontrivial despite mechanical evidence" \
+    || bad "expected nontrivial classification for UI?/UI) prose (got: $out)"
+)
+
+echo "[lint-Mfence] has_rows ignores fenced traceability content (MAJ-4)"
+(
+  # Pre-fix: the has_rows awk does not track fenced code blocks. A
+  # traceability section that contains ONLY a fenced table satisfies the
+  # has_rows check (the `|`-line matches the regex). The fix must
+  # fence-track so a fenced-only traceability section still fires the
+  # `section.traceability: no table-row / FR-/NFR- entry` blocker.
+  TMP="$(mktemp -d)"
+  cat > "$TMP/fenced-only-traceability.md" <<'EOF4'
+# TDD
+Status: draft
+PRD refs: FR-99
+PRD-rev: dead
+ADR constraints: none
+## Approach
+x
+## Verification plan
+Run the CLI, observe exit code 0, stdout matches.
+## Requirement traceability
+Below is what we'd put if there were anything to put, but this is just
+an illustrative code block, not a real table:
+```
+| FR | thing |
+|---|---|
+| FR-99 | x |
+```
+## Dependencies considered
+None.
+EOF4
+  out="$(bash "$LINT" "$TMP/fenced-only-traceability.md" 2>/dev/null)"; rc=$?
+  rm -rf "$TMP"
+  if [ "$rc" -eq 2 ]; then
+    printf '%s\n' "$out" | grep -q 'section.traceability' \
+      && ok "blocker fires when traceability content is only inside a fence" \
+      || bad "expected /section.traceability/ blocker (got: $out)"
+  else
+    bad "expected rc=2 blocker for fenced-only traceability (got rc=$rc, out=$out)"
+  fi
+)
+
 PASS="$(grep -c '^ok$'   "$RESULTS" 2>/dev/null)"; PASS="${PASS:-0}"
 FAIL="$(grep -c '^fail$' "$RESULTS" 2>/dev/null)"; FAIL="${FAIL:-0}"
 rm -f "$RESULTS"
