@@ -33,7 +33,7 @@ prd-author, tdd-author, design-reviewer, and the runtime gate):
 1. `skills/tdd-author/SKILL.md` (FR-23, FR-8) — add `## Verification plan` to the TDD
    template (placed after "Failure modes & edge cases", before "Requirement
    traceability"), an authoring step requiring it, and add a planless or
-   "verify it works"-style plan to the no-placeholder failure list. The template in
+   `verify it works`-style plan to the no-placeholder failure list. The template in
    THIS skill is the one future runs emit, so the section propagates automatically.
 2. `skills/prd-author/SKILL.md` (FR-24, FR-5) — Process: every NEW requirement states
    an observable acceptance criterion — phrased as an observation of the artifact's
