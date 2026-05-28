@@ -545,6 +545,25 @@ state_init() {
 # set_run_state <state>  — rewrite run.json (refresh updated_at + rollup counts).
 set_run_state() { _write_run_fragment "$1"; }
 
+# _terminal_state <slug> <status> [stage] [note]
+# TDD 0011 / iter-10 M-1+M-2: wrapper around set_tdd_state that surfaces
+# write failures at TERMINAL verdict points (done/failed/blocked/skipped/
+# paused). A swallowed failure here would leave the fragment stuck in a
+# pre-terminal stage (building/verifying/reviewing) forever, violating
+# FR-44 (run-state record remains internally consistent). The wrapper
+# echoes to stderr AND appends to $REPORT so a disk-full at the verdict
+# write is visible in the human-readable summary, not just lost to a
+# detached process's discarded stderr.
+_terminal_state() {
+  local slug="$1" status="$2"
+  if ! set_tdd_state "$@"; then
+    local msg="warning: could not write terminal verdict status=$status for $slug (fragment may be stale)"
+    echo "$msg" >&2
+    [ -n "${REPORT:-}" ] && [ -w "$(dirname "${REPORT}")" ] 2>/dev/null && echo "$msg" >> "$REPORT"
+    return 1
+  fi
+}
+
 # set_tdd_state <slug> <status> <stage> [note] [gate-completed-append]
 # Rewrite that TDD's fragment atomically; carry n/queue_pos/path/started_at/
 # branch/pr_url/log + the FR-39..45 additive fields forward. `stage=""` writes
@@ -1213,7 +1232,11 @@ _resume_from() {
       # swallow a fragment-write failure and let the driver's report
       # read back a stale paused_cause (e.g. "ratelimit") instead of
       # the resume-blocked diagnostic.
-      _update_paused_cause "$slug" "resume-blocked-build-state-missing" \
+      # TDD 0011 / iter-10 M-3: also expose the cause via a global so
+      # drivers don't have to re-read it from the fragment (and read a
+      # stale value if the write failed).
+      RESUME_REFUSE_CAUSE="resume-blocked-build-state-missing"
+      _update_paused_cause "$slug" "$RESUME_REFUSE_CAUSE" \
         || echo "warning: _resume_from $slug: could not update paused_cause (status.sh may show stale cause)" >&2
       return 3
     fi
@@ -1221,12 +1244,8 @@ _resume_from() {
   # In combined mode we deliberately bypass the has_test_first check —
   # gate 1 will re-run via the empty done_list below.
   if [ "$combined_resume" -eq 0 ] && [ "$has_test_first" -ne 1 ]; then
-    # TDD 0011 / BLOCKER-2: refuse-to-resume returns rc=3 so the driver can
-    # halt this TDD without falling through to gate_one (which would
-    # silently overwrite paused→building). All callers (parallel /
-    # sequential / combined) MUST check $? and skip gate_one on rc=3.
-    # TDD 0011 / iter-6 MAJOR-4: surface fragment-write failures.
-    _update_paused_cause "$slug" "resume-blocked-build-state-missing" \
+    RESUME_REFUSE_CAUSE="resume-blocked-build-state-missing"
+    _update_paused_cause "$slug" "$RESUME_REFUSE_CAUSE" \
       || echo "warning: _resume_from $slug: could not update paused_cause (status.sh may show stale cause)" >&2
     return 3
   fi
@@ -1241,8 +1260,9 @@ _resume_from() {
     local current_head
     current_head="$(git rev-parse --verify "refs/heads/$branch" 2>/dev/null || true)"
     if [ -n "$current_head" ] && [ "$current_head" != "$branch_head_at_pause" ]; then
-      # TDD 0011 / iter-6 MAJOR-4: surface fragment-write failures.
-      _update_paused_cause "$slug" "resume-blocked-branch-divergence" \
+      # iter-10 M-3: expose cause via global for drivers.
+      RESUME_REFUSE_CAUSE="resume-blocked-branch-divergence"
+      _update_paused_cause "$slug" "$RESUME_REFUSE_CAUSE" \
         || echo "warning: _resume_from $slug: could not update paused_cause (status.sh may show stale cause)" >&2
       return 3   # see BLOCKER-2
     fi
@@ -1320,18 +1340,18 @@ gate_one() {  # <tdd> <review-base-ref> <log>
     # trusted. Use the fragment's retries[] count as the proxy.
     _retries_json="$(_read_fragment_raw_array "${STATE_DIR:-}/$slug.json" retries 2>/dev/null)"
     if [ "$rrc" -ne 0 ] && [ -n "$_retries_json" ] && [ "$_retries_json" != "[]" ]; then
-      set_tdd_state "$slug" failed "" "build gate fatal exit after retries (rc=$rrc)"
+      _terminal_state "$slug" failed "" "build gate fatal exit after retries (rc=$rrc)"
       echo "FAIL build (fatal exit after retries; see log)"; return 1
     fi
     bs="$(build_status "$log")"
     case "$bs" in
       *BLOCKED*) record_blocker "$tdd" "${bs#*BLOCKED}"
-                 set_tdd_state "$slug" blocked "" "build BLOCKED (design):${bs#*BLOCKED}"
+                 _terminal_state "$slug" blocked "" "build BLOCKED (design):${bs#*BLOCKED}"
                  echo "BLOCKED (design)${bs#*BLOCKED}"; return 1 ;;
     esac
     case "$bs" in
       *OK*) : ;;
-      *) set_tdd_state "$slug" failed "" "build did not return OK (${bs:-no BATCH_RESULT})"
+      *) _terminal_state "$slug" failed "" "build did not return OK (${bs:-no BATCH_RESULT})"
          echo "${bs:-FAIL (no BATCH_RESULT; see log)}"; return 1 ;;
     esac
   fi
@@ -1340,7 +1360,7 @@ gate_one() {  # <tdd> <review-base-ref> <log>
   if ! _is_done test-first; then
     set_tdd_state "$slug" verifying test-first
     if ! test_first_ok "$rbase" "$log"; then
-      set_tdd_state "$slug" failed "" "test-first gate: no failing-test-first commit"
+      _terminal_state "$slug" failed "" "test-first gate: no failing-test-first commit"
       echo "FAIL test-first (no failing-test-first commit and no TEST_FIRST: SKIPPED; not flipped)"; return 1; fi
     # TDD 0011 / iter-9 SF-2: gate-completion writes feed FR-40's
     # resume hint; a swallowed failure would let resume re-run completed
@@ -1351,7 +1371,7 @@ gate_one() {  # <tdd> <review-base-ref> <log>
   if ! _is_done verify; then
     set_tdd_state "$slug" verifying verify
     if ! run_verify "$log"; then
-      set_tdd_state "$slug" failed "" "verify.sh FAIL (tests/typecheck/lint)"
+      _terminal_state "$slug" failed "" "verify.sh FAIL (tests/typecheck/lint)"
       echo "FAIL verification (tests/typecheck/lint red; not flipped)"; return 1; fi
     set_tdd_state "$slug" verifying verify "" verify \
       || echo "warning: gate_one: could not record verify completion for $slug" >&2
@@ -1373,18 +1393,18 @@ gate_one() {  # <tdd> <review-base-ref> <log>
     # gate 1.
     _retries_json="$(_read_fragment_raw_array "${STATE_DIR:-}/$slug.json" retries 2>/dev/null)"
     if [ "$rrc" -ne 0 ] && [ -n "$_retries_json" ] && [ "$_retries_json" != "[]" ]; then
-      set_tdd_state "$slug" failed "" "runtime-verify gate fatal exit after retries (rc=$rrc)"
+      _terminal_state "$slug" failed "" "runtime-verify gate fatal exit after retries (rc=$rrc)"
       echo "FAIL runtime-verify (fatal exit after retries; see log)"; return 1
     fi
     rvs="$(verify_runtime_status "$log")"
     case "$rvs" in
       *PASS*|*SKIP*) set_tdd_state "$slug" verifying verify-runtime "" verify-runtime \
                        || echo "warning: gate_one: could not record verify-runtime completion for $slug" >&2 ;;
-      *BLOCKED*) set_tdd_state "$slug" blocked "" "runtime-verify BLOCKED (couldn't observe)"
+      *BLOCKED*) _terminal_state "$slug" blocked "" "runtime-verify BLOCKED (couldn't observe)"
                  echo "BLOCKED runtime-verify (couldn't observe)${rvs#*BLOCKED}"; return 1 ;;
-      *FAIL*)    set_tdd_state "$slug" failed "" "runtime-verify FAIL"
+      *FAIL*)    _terminal_state "$slug" failed "" "runtime-verify FAIL"
                  echo "FAIL runtime-verify${rvs#*FAIL}"; return 1 ;;
-      *) set_tdd_state "$slug" failed "" "runtime-verify: no VERIFY_RUNTIME line"
+      *) _terminal_state "$slug" failed "" "runtime-verify: no VERIFY_RUNTIME line"
          echo "FAIL runtime-verify (no VERIFY_RUNTIME line; ambiguity is never a false PASS; see log)"; return 1 ;;
     esac
   fi
@@ -1401,23 +1421,23 @@ gate_one() {  # <tdd> <review-base-ref> <log>
     # TDD 0011 / iter-6 MAJOR-1: same retries-proxy as gates 1 and 3.
     _retries_json="$(_read_fragment_raw_array "${STATE_DIR:-}/$slug.json" retries 2>/dev/null)"
     if [ "$rrc" -ne 0 ] && [ -n "$_retries_json" ] && [ "$_retries_json" != "[]" ]; then
-      set_tdd_state "$slug" failed "" "review gate fatal exit after retries (rc=$rrc)"
+      _terminal_state "$slug" failed "" "review gate fatal exit after retries (rc=$rrc)"
       echo "FAIL review (fatal exit after retries; see log)"; return 1
     fi
     rs="$(review_status "$log")"
     case "$rs" in
       *PASS*) set_tdd_state "$slug" reviewing review "" review \
                 || echo "warning: gate_one: could not record review completion for $slug" >&2 ;;
-      *BLOCK*) set_tdd_state "$slug" failed "" "review BLOCK"
+      *BLOCK*) _terminal_state "$slug" failed "" "review BLOCK"
                echo "FAIL review:${rs#*BLOCK}"; return 1 ;;
-      *) set_tdd_state "$slug" failed "" "review: no REVIEW_RESULT line"
+      *) _terminal_state "$slug" failed "" "review: no REVIEW_RESULT line"
          echo "FAIL review (no REVIEW_RESULT; see log)"; return 1 ;;
     esac
   fi
 
   set_tdd_state "$slug" reviewing flip
   flip_status "$tdd" "$log"
-  set_tdd_state "$slug" done "" "OK (verified + reviewed)"
+  _terminal_state "$slug" done "" "OK (verified + reviewed)"
   echo "OK (verified + reviewed)"; return 0
 }
 
@@ -1468,7 +1488,7 @@ if [ "$PARALLEL" -eq 1 ]; then
     built="$(built_branch "$tdd")"
     if [ -n "$built" ]; then
       SKIPPED[$slug]="$built"
-      set_tdd_state "$slug" skipped "" "already built on $built; awaiting your merge"
+      _terminal_state "$slug" skipped "" "already built on $built; awaiting your merge"
       set_tdd_meta  "$slug" "branch=$built"
       continue
     fi
@@ -1515,7 +1535,7 @@ if [ "$PARALLEL" -eq 1 ]; then
       else
         if ! git worktree add "$wt" "feat/$slug" >>"$log" 2>&1; then
           echo "worktree-resume failed for $slug" >>"$log"
-          set_tdd_state "$slug" failed "" "worktree resume failed"
+          _terminal_state "$slug" failed "" "worktree resume failed"
           continue
         fi
       fi
@@ -1537,12 +1557,12 @@ if [ "$PARALLEL" -eq 1 ]; then
         { echo "- $slug — FAIL (orphan branch feat/$slug exists from a prior run;"
           echo "  delete it with: git branch -D feat/$slug   (and any worktree at $wt)"
           echo "  before retrying)"; } >>"$REPORT"
-        set_tdd_state "$slug" failed "" "orphan branch feat/$slug exists; delete before retry"
+        _terminal_state "$slug" failed "" "orphan branch feat/$slug exists; delete before retry"
         continue
       fi
       if ! git worktree add -b "feat/$slug" "$wt" "$BASE" >>"$log" 2>&1; then
         echo "worktree failed for $slug" >>"$log"
-        set_tdd_state "$slug" failed "" "worktree create failed"
+        _terminal_state "$slug" failed "" "worktree create failed"
         continue
       fi
     fi
@@ -1570,7 +1590,7 @@ if [ "$PARALLEL" -eq 1 ]; then
         _rrc=$?
         if [ "$_rrc" -eq 3 ]; then
           # Read the just-written paused_cause for the report.
-          _cause="$(_read_fragment_field "$STATE_DIR/$slug.json" paused_cause)"
+          _cause="${RESUME_REFUSE_CAUSE:-$(_read_fragment_field "$STATE_DIR/$slug.json" paused_cause)}"; unset RESUME_REFUSE_CAUSE
           printf 'PARSTATUS::PAUSED (refuse-to-resume: %s)\n' "${_cause:-unknown}" >>"$abslog"
           exit 0
         fi
@@ -1620,7 +1640,7 @@ else
       echo "- combined set already built on $cb (awaiting your merge); skipped. Use --rebuild to force." >>"$REPORT"
       for tdd in "${TDDS[@]}"; do
         slug="$(basename "$tdd" .md)"
-        set_tdd_state "$slug" skipped "" "combined set already built on $cb; awaiting your merge"
+        _terminal_state "$slug" skipped "" "combined set already built on $cb; awaiting your merge"
         set_tdd_meta  "$slug" "branch=$cb"
       done
     else
@@ -1633,7 +1653,7 @@ else
       [ "$paused_halt" -eq 1 ] && break
       if [ "$blocked" -eq 1 ]; then
         echo "- $slug — BLOCKED (upstream TDD failed; not attempted)" >>"$REPORT"
-        set_tdd_state "$slug" blocked "" "upstream TDD failed; not attempted"
+        _terminal_state "$slug" blocked "" "upstream TDD failed; not attempted"
         continue
       fi
       # TDD 0011 / MA-3: write branch metadata BEFORE _resume_from runs.
@@ -1649,7 +1669,7 @@ else
           # TDD 0011 / BLOCKER-2: refuse-to-resume — log the cause, halt
           # (combined mode follows the paused_halt semantics), do NOT
           # call gate_one which would overwrite paused→building.
-          _cause="$(_read_fragment_field "$STATE_DIR/$slug.json" paused_cause)"
+          _cause="${RESUME_REFUSE_CAUSE:-$(_read_fragment_field "$STATE_DIR/$slug.json" paused_cause)}"; unset RESUME_REFUSE_CAUSE
           echo "- $slug — refuse-to-resume: ${_cause:-unknown} (no gate run)" >>"$REPORT"
           paused_halt=1
           continue
@@ -1692,13 +1712,13 @@ else
       [ "$paused_halt" -eq 1 ] && break
       if [ "$blocked" -eq 1 ]; then
         echo "- $slug — BLOCKED (upstream TDD failed; not attempted)" >>"$REPORT"
-        set_tdd_state "$slug" blocked "" "upstream TDD failed; not attempted"
+        _terminal_state "$slug" blocked "" "upstream TDD failed; not attempted"
         continue
       fi
       built="$(built_branch "$tdd")"
       if [ -n "$built" ]; then
         echo "- $slug — already built on $built (awaiting your merge); skipped" >>"$REPORT"
-        set_tdd_state "$slug" skipped "" "already built on $built; awaiting your merge"
+        _terminal_state "$slug" skipped "" "already built on $built; awaiting your merge"
         set_tdd_meta  "$slug" "branch=$built"
         prev="$built"; continue; fi   # stack later TDDs on the already-built branch
       if ! git checkout -b "$branch" "$prev" >>"$log" 2>&1; then
@@ -1719,7 +1739,7 @@ else
           paused_halt=1; continue
         else
           echo "- $slug — FAIL (could not branch off $prev; log: $log)" >>"$REPORT"
-          set_tdd_state "$slug" failed "" "could not branch off $prev"
+          _terminal_state "$slug" failed "" "could not branch off $prev"
           blocked=1; continue
         fi
       fi
@@ -1731,7 +1751,7 @@ else
           # TDD 0011 / BLOCKER-2: refuse-to-resume halts cleanly. Log
           # the cause, mark paused_halt, do NOT call gate_one (which
           # would overwrite paused→building and lose the cause).
-          _cause="$(_read_fragment_field "$STATE_DIR/$slug.json" paused_cause)"
+          _cause="${RESUME_REFUSE_CAUSE:-$(_read_fragment_field "$STATE_DIR/$slug.json" paused_cause)}"; unset RESUME_REFUSE_CAUSE
           echo "- $slug — refuse-to-resume: ${_cause:-unknown} (no gate run)" >>"$REPORT"
           paused_halt=1; continue
         fi
