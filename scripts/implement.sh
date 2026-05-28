@@ -1000,12 +1000,24 @@ verify_runtime_one() {  # <tdd> <base-ref> <log>
   # was IDENTICAL to a genuine nontrivial classification, so a triage
   # could not tell a crashed classifier from a deliberate choice. The
   # `(classifier failed, rc=N)` annotation preserves NFR-4 honesty.
+  # MAJ-1 (review pass 3): the classifier's stderr is redirected to the
+  # gate log (`2>>"$log"`) rather than silenced. With BL-1/BL-2 fixed so
+  # the classifier itself surfaces awk crashes as rc≠0 + stderr, the log
+  # capture preserves the only externally-observable signal of what went
+  # wrong for triage — `2>/dev/null` would have erased it.
+  #
+  # MAJ-2 (review pass 3): the env-pinned branch now applies the same
+  # `case` guard for unexpected classifier output as the unpinned branch,
+  # sanitizing any non-{mechanical, nontrivial} value to `nontrivial`
+  # with a distinguishing note. Without this guard a misbehaving
+  # classifier could propagate arbitrary text into the `plan=<x>` log
+  # line, polluting the FR-36 observability surface.
   local cls_rc
   if [ -z "$vm" ]; then
     if [ -f "$classifier" ]; then
       # shellcheck source=/dev/null
       . "$classifier"
-      cls="$(tl_classify_plan "$tdd" 2>/dev/null)"; cls_rc=$?
+      cls="$(tl_classify_plan "$tdd" 2>>"$log")"; cls_rc=$?
       if [ "$cls_rc" -ne 0 ] || [ -z "$cls" ]; then
         vm="$MODEL"; cls="nontrivial"; note=" (classifier failed, rc=$cls_rc)"
       else
@@ -1024,9 +1036,17 @@ verify_runtime_one() {  # <tdd> <base-ref> <log>
     if [ -f "$classifier" ]; then
       # shellcheck source=/dev/null
       . "$classifier"
-      cls="$(tl_classify_plan "$tdd" 2>/dev/null)"; cls_rc=$?
+      cls="$(tl_classify_plan "$tdd" 2>>"$log")"; cls_rc=$?
       if [ "$cls_rc" -ne 0 ] || [ -z "$cls" ]; then
         cls="nontrivial"; note=" (classifier failed, rc=$cls_rc)"
+      else
+        case "$cls" in
+          mechanical|nontrivial) : ;;  # accept the heuristic's choice for the log line
+          *)
+            note=" (classifier returned unexpected '$cls', defaulted nontrivial)"
+            cls="nontrivial"
+            ;;
+        esac
       fi
     else
       cls="nontrivial"; note=" (classifier missing)"

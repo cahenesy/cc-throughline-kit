@@ -266,27 +266,31 @@ tl_lint_traced() {  # <tdd-path>
   [ -z "$refs_ids" ] && return 0   # nothing to trace
 
   # Pull all FR-/NFR- mentions from the traceability section body.
-  # MAJ-2 (review pass 2): check the pipeline's exit code via PIPESTATUS so
-  # an awk crash surfaces as rc=2 rather than silently producing an empty
-  # ids_in_table — which would map every FR in `PRD refs` to a
-  # false-positive "untraced" major finding.
-  ids_in_table="$(awk '
+  #
+  # BL-1 (review pass 3): the previous form used `PIPESTATUS` AFTER a
+  # `$(pipeline)` command substitution. Without `set -o pipefail`,
+  # `PIPESTATUS` in the outer shell collapses to a single subshell exit
+  # code — and the production CLI invocation
+  # `bash scripts/lib/tdd-lint.sh <tdd>` runs WITHOUT pipefail, so the
+  # guard was non-functional on the primary use path (`pipe_rcs[1]`
+  # was also unset, emitting `[: : integer expected` under `set -u` on
+  # every CLEAN run). The fix runs awk INDEPENDENTLY of the pipeline,
+  # captures awk's rc directly, and only then pipes the captured awk
+  # output to the trivial tail (grep/sort) — which never reaches the
+  # primary failure modes for this lint (grep rc=1 = no matches = valid
+  # empty result; sort is read-only on a small stdin buffer).
+  local awk_out awk_rc
+  awk_out="$(awk '
     /^## Requirement traceability$/ { in_sec=1; next }
     /^## / { in_sec=0; next }
     in_sec { print }
-  ' "$f" | grep -oE '(FR|NFR)-[0-9]+' | sort -u)"
-  local pipe_rcs=("${PIPESTATUS[@]}")
-  if [ "${pipe_rcs[0]}" -ne 0 ]; then
-    echo "tdd-lint: traced: ids_in_table awk failed (exit ${pipe_rcs[0]}) on $f" >&2
+  ' "$f")"
+  awk_rc=$?
+  if [ "$awk_rc" -ne 0 ]; then
+    echo "tdd-lint: traced: ids_in_table awk failed (exit $awk_rc) on $f" >&2
     return 2
   fi
-  # grep returns 1 when no FR-/NFR- IDs are present, which is valid (just
-  # means the traceability section has no ID mentions). Only treat
-  # grep/sort exit ≥2 as a real error.
-  if [ "${pipe_rcs[1]}" -ge 2 ] || [ "${pipe_rcs[2]:-0}" -ne 0 ]; then
-    echo "tdd-lint: traced: ids_in_table pipeline failed (grep=${pipe_rcs[1]} sort=${pipe_rcs[2]:-0}) on $f" >&2
-    return 2
-  fi
+  ids_in_table="$(printf '%s\n' "$awk_out" | grep -oE '(FR|NFR)-[0-9]+' | sort -u)"
 
   # Find the PRD-refs line's actual line number for the finding pointer.
   local refs_line_num

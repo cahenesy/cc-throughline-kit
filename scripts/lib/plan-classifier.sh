@@ -25,22 +25,28 @@ tl_classify_plan() {
   # the next `^## ` heading). The body, lowercased, is what the keyword
   # checks scan — nothing else in the TDD should influence the classifier.
   #
-  # MAJ-3 (review pass 2): check PIPESTATUS for the awk|tr pipeline. An awk
-  # crash would otherwise leave body empty and fall through to the
-  # conservative "nontrivial" default with rc=0 — which the runner's M3
-  # fix then treats as a genuine nontrivial classification, bypassing
-  # the "(classifier failed, ...)" log note.
-  local body body_rcs
-  body="$(awk '
+  # BL-2 (review pass 3): the previous form used `PIPESTATUS` after a
+  # `$(awk | tr)` command substitution. Without `set -o pipefail`,
+  # `PIPESTATUS` in the outer shell collapses to a single subshell
+  # exit — and the production CLI invocation
+  # `bash scripts/lib/plan-classifier.sh <tdd>` runs WITHOUT pipefail,
+  # so the guard was non-functional on that path (the
+  # implement.sh-sourced path happened to work because implement.sh
+  # sets pipefail). Run awk INDEPENDENTLY of `tr` so awk's rc is
+  # directly observable; `tr` is a deterministic character translator
+  # that doesn't fail on the captured-string stdin.
+  local body body_awk awk_rc
+  body_awk="$(awk '
     /^## Verification plan/ { in_sec=1; next }
     /^## / { in_sec=0; next }
     in_sec { print }
-  ' "$f" | tr '[:upper:]' '[:lower:]')"
-  body_rcs=("${PIPESTATUS[@]}")
-  if [ "${body_rcs[0]}" -ne 0 ] || [ "${body_rcs[1]:-0}" -ne 0 ]; then
-    echo "plan-classifier: body-extract pipeline failed (awk=${body_rcs[0]} tr=${body_rcs[1]:-0}) on $f" >&2
+  ' "$f")"
+  awk_rc=$?
+  if [ "$awk_rc" -ne 0 ]; then
+    echo "plan-classifier: body-extract awk failed (exit $awk_rc) on $f" >&2
     return 2
   fi
+  body="$(printf '%s' "$body_awk" | tr '[:upper:]' '[:lower:]')"
 
   # Nontrivial triggers — the bare keyword set the TDD enumerates. Case-
   # insensitive match against the lowercased body. "websocket" covers the
