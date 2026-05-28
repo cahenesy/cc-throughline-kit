@@ -1,6 +1,6 @@
 # TDD 0014: Bounded TDD scope — declared expected-diff-size, mechanical bounds, design-critique scope authority
 
-Status: draft
+Status: implemented
 PRD refs: FR-53, FR-54, FR-55
 PRD-rev: a961955
 ADR constraints: 0003, 0004, 0005
