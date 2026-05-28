@@ -687,6 +687,51 @@ EOF2
     || bad "expected stderr to mention the classifier failure (got: $err)"
 )
 
+# --- Pass 5: tl_lint_traced fence-awareness ---------------------------------
+
+echo "[lint-Mfence-traced] tl_lint_traced ignores FR IDs that appear ONLY inside a fence (MAJ-1 from pass 5)"
+(
+  # Pre-fix: tl_lint_traced's body-extraction awk has no fence tracking,
+  # so an FR ID that appears only inside a ``` fenced code block in the
+  # Requirement traceability section counts as "traced" — silently
+  # suppressing the traceability.untraced finding. The same file's
+  # has_rows + section.empty + tl_lint_placeholders are all fence-aware
+  # (MAJ-4 in pass 2 added this to has_rows). tl_lint_traced is the
+  # holdout; this test pins down the inconsistency.
+  TMP="$(mktemp -d)"
+  cat > "$TMP/fenced-fr.md" <<'EOF5'
+# TDD
+Status: draft
+PRD refs: FR-1, FR-2
+PRD-rev: dead
+ADR constraints: none
+## Approach
+x
+## Verification plan
+Run the CLI, observe exit code 0.
+## Requirement traceability
+| PRD | Design element |
+|---|---|
+| FR-1 | something |
+
+FR-2 is illustrated below as code-fence prose, NOT as a real
+traceability row:
+```
+| FR-2 | (this is just example syntax, not a real entry) |
+```
+## Dependencies considered
+None.
+EOF5
+  out="$(bash "$LINT" "$TMP/fenced-fr.md" 2>/dev/null)"; rc=$?
+  rm -rf "$TMP"
+  printf '%s\n' "$out" | grep -q 'traceability.untraced.*FR-2' \
+    && ok "blocker fires on FR-2 traced only inside a fenced block" \
+    || bad "expected traceability.untraced finding for FR-2 (got: $out)"
+  [ "$rc" -ge 1 ] \
+    && ok "exit code reflects the finding (rc=$rc)" \
+    || bad "expected non-zero rc when FR is traced only via fenced text (got rc=$rc)"
+)
+
 PASS="$(grep -c '^ok$'   "$RESULTS" 2>/dev/null)"; PASS="${PASS:-0}"
 FAIL="$(grep -c '^fail$' "$RESULTS" 2>/dev/null)"; FAIL="${FAIL:-0}"
 rm -f "$RESULTS"
