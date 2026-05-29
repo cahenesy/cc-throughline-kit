@@ -464,6 +464,52 @@ echo "[D2] rework-prompt.md exists and carries the key bounded-fix instructions"
   grep -qiE 'do not modify tests|tests.*mask' "$F" && ok "warns against masking the bug via tests" || bad "prompt should warn against test-masking"
 ) || true
 
+# --- §3 / FR-68: original-build token spend recorded for the comparison ------
+echo "[F1] _last_session_path finds the newest session newer than the start epoch"
+( D="$ROOT/F1"; mkdir -p "$D/state.d"; cd "$D" || { bad "cd failed"; exit 0; }
+  export STATE_DIR="$D/state.d" STATE_STARTED_AT=1000 STATE_MODE="sequential"
+  export INTEGRATION="master" CHANGE="ci" LOGDIR="$D" HOME="$D/home"
+  TDDS=()
+  THROUGHLINE_SOURCE_ONLY=1 source "$IMPL" || { bad "source guard missing"; exit 0; }
+  enc="$(printf '%s' "$PWD" | sed 's|/|-|g')"
+  proj="$HOME/.claude/projects/$enc"; mkdir -p "$proj"
+  printf '{"type":"assistant"}\n' > "$proj/sess.jsonl"
+  got="$(_last_session_path 1)"
+  [ "$got" = "$proj/sess.jsonl" ] && ok "_last_session_path returns the session path" \
+    || bad "_last_session_path should return $proj/sess.jsonl (got '$got')"
+) || true
+
+echo "[F2] build_one records build_attempt.token_spend from its session JSON"
+( D="$ROOT/F2"; mkdir -p "$D/state.d" "$D/bin"; cd "$D" || { bad "cd failed"; exit 0; }
+  export STATE_DIR="$D/state.d" STATE_STARTED_AT=1000 STATE_MODE="sequential"
+  export INTEGRATION="master" CHANGE="ci" LOGDIR="$D" HOME="$D/home"
+  export TMPL="$REPO/scripts/build-prompt.md" MODEL=""
+  TDDS=()
+  THROUGHLINE_SOURCE_ONLY=1 source "$IMPL" || { bad "source guard missing"; exit 0; }
+  _write_tdd_fragment 0099-fix 99 docs/tdd/0099-fix.md 1 building build \
+    1000 1000 "" "" "log" "" "" "" "" "" "" "" "" ""
+  enc="$(printf '%s' "$PWD" | sed 's|/|-|g')"
+  proj="$HOME/.claude/projects/$enc"; mkdir -p "$proj"
+  cat > "$proj/sess.jsonl" <<'EOF'
+{"type":"assistant","message":{"role":"assistant","usage":{"input_tokens":1000,"output_tokens":234,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}
+EOF
+  # no-op stub claude (build_one's own work is irrelevant here; we assert the
+  # post-build token-spend recording).
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$D/bin/claude"; chmod +x "$D/bin/claude"
+  export PATH="$D/bin:$PATH"
+  build_one docs/tdd/0099-fix.md "$D/build.log" >/dev/null 2>&1
+  F="$D/state.d/0099-fix.json"
+  if command -v jq >/dev/null 2>&1; then
+    grep -q '"build_attempt":{"token_spend":1234}' "$F" 2>/dev/null \
+      && ok "build_attempt.token_spend = 1234 from session" \
+      || bad "build_attempt.token_spend should be 1234 (got: $(_read_fragment_raw_object "$F" build_attempt))"
+  else
+    grep -q '"build_attempt":{"token_spend":null}' "$F" 2>/dev/null \
+      && ok "build_attempt.token_spend = null without jq (acceptable per FR-68)" \
+      || bad "build_attempt should be {token_spend:null} without jq"
+  fi
+) || true
+
 echo
 PASS="$(grep -c '^ok$'   "$RESULTS" 2>/dev/null)"; PASS="${PASS:-0}"
 FAIL="$(grep -c '^fail$' "$RESULTS" 2>/dev/null)"; FAIL="${FAIL:-0}"
