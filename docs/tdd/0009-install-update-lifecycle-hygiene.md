@@ -31,7 +31,7 @@ writes against these schemas. Both use a top-level integer `schema` field
 ```json
 {
   "schema": 1,
-  "plugin_version_applied": "3.3.3",
+  "plugin_version_applied": "3.9.0",
   "language": "shell",
   "repo_steps_applied": ["scaffold", "gitignore", "git_init"],
   "applied_at": "2026-05-26T20:30:00Z"
@@ -45,7 +45,7 @@ on-disk effect is visible to teammates via git.
 ```json
 {
   "schema": 1,
-  "plugin_version_seen": "3.3.3",
+  "plugin_version_seen": "3.9.0",
   "local_steps_completed": ["deps_installed"],
   "updated_at": "2026-05-26T20:30:00Z"
 }
@@ -138,22 +138,23 @@ compute the same id.
    7. Exit 0.
 
 6. **`.claude-plugin/releases.json` (new).** Append-only release-metadata
-   manifest, queried by the hook (step 6 above) and editable per release:
+   manifest, queried by the hook (step 6 above) and editable per release.
+   Seed with one entry per shipped version through the current
+   `plugin.json` `version`, all defaulted to `local_impacting: false` —
+   prior releases were pure governance/runner changes that do not require
+   any local-developer action. Example shape (concrete entries are
+   generated from `git tag` / release history at build time):
    ```json
    [
-     { "version": "3.3.4", "local_impacting": false },
-     { "version": "3.3.3", "local_impacting": false },
-     { "version": "3.3.2", "local_impacting": false },
-     { "version": "3.3.1", "local_impacting": false }
+     { "version": "<current plugin.json version>", "local_impacting": false },
+     { "version": "<prior version>",                "local_impacting": false }
    ]
    ```
    A release omitted from the manifest defaults to `local_impacting: false`
    (conservative — never spam without explicit signal). The plugin maintainer
    appends a new entry as part of any release bumping `plugin.json`'s `version`
    that changes local-developer-required setup (a new toolchain dep, an
-   incompatible deps bump, a CLI binary added). The current release at this
-   TDD's authoring is 3.3.4 (this design PR's bump); none of 3.3.1..3.3.4 are
-   local-impacting (they're pure governance/runner changes).
+   incompatible deps bump, a CLI binary added).
 
 7. **`hooks/hooks.json` (modified).** Register the new hook:
    ```json
@@ -182,6 +183,13 @@ compute the same id.
   bool).
 
 ## Sequencing / implementation plan
+
+**Build-order constraint.** TDD 0012 (interactive draft persistence) consumes
+`scripts/lib/repo-id.sh::tl_repo_id` introduced here and depends on the
+`${CLAUDE_PLUGIN_DATA}/<repo-id>/` path convention this TDD establishes. TDD
+0012 cannot be built before this TDD; the `/implement` queue must order 0009
+ahead of 0012 (or 0012 must absorb `tl_repo_id` into its own helper set).
+
 1. Land helpers (`scripts/lib/repo-id.sh`, `markers.sh`, `gitignore.sh`) with
    unit tests for each. Pure functions, no IO outside the marker writes; easy
    to test in isolation. Test order: repo-id → gitignore → markers.

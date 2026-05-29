@@ -7,33 +7,45 @@ ADR constraints: 0003, 0004; (proposes ADR 0005)
 
 ## Approach
 This TDD has an asymmetric shape: the runtime behavior covering FR-36..38 is
-**already implemented** in `scripts/implement.sh` + `scripts/build-prompt.md`
-+ `scripts/verify-runtime-prompt.md` (landed in commit 72192b9 / PR #24,
-authored before the PRD captured the requirements). The TDD's scope is
-therefore **design rationale + verification + tests for the existing
+**already implemented**, and since this TDD was first drafted the
+implementation has also been refactored into the post-TDD-0015/0016/0017 lib
+layout. Concretely:
+
+- `record_session_pointer` originally landed inline in `scripts/implement.sh`
+  (commit 72192b9 / PR #24, authored before the PRD captured the
+  requirements). It was extracted into `scripts/lib/pause-retry.sh` by TDD
+  0016 and is now called from `build_one` / `review_one` /
+  `verify_runtime_one` in `scripts/lib/gates.sh` (extracted by TDD 0017).
+- The build-prompt and verify-runtime-prompt boundary sections are unchanged
+  from their original 72192b9 form (still in `scripts/build-prompt.md` and
+  `scripts/verify-runtime-prompt.md`).
+- **ADR 0005 — "Gate scope enforced by prompt + downstream detection, not
+  sandboxing" — was already accepted on the integration branch (commit
+  1482eef, alongside the TDDs 0009 + 0010 design PR).** This TDD does NOT
+  re-promote it; the ADR is a static reference.
+
+The TDD's scope is therefore **tests + a design pointer for the existing
 implementation**, not a new implementation. The build phase emits
 `TEST_FIRST: SKIPPED no-new-behavior (covered by existing implementation
-72192b9 — TDD scope is tests + verification + design record)`; the new tests
-in `tests/build-observability.test.sh` exercise the existing implementation
-and pass green on the first commit because the implementation already
-satisfies them — they are not "failing-test-first" tests in any meaningful
-sense, which is exactly why the gate-1 SKIP is the honest verdict. This is
-what FR-15(a)'s test-first-SKIPPED escape hatch is for; the four-gate system
-still gates flip on the runtime-verify and review gates passing against the
-real artifact.
-
-The cross-cutting design principle the existing implementation embodies — that
-gate scope is enforced by **prompt instruction plus downstream gate detection**,
-not by sandbox or static-analysis — is promoted to ADR 0005, so future TDDs
-inherit it.
+72192b9 + lib extraction in TDDs 0016/0017 — TDD scope is tests + design
+pointer)`; the new tests in `tests/build-observability.test.sh` exercise the
+existing implementation and pass green on the first commit because the
+implementation already satisfies them — they are not "failing-test-first"
+tests in any meaningful sense, which is exactly why the gate-1 SKIP is the
+honest verdict. This is what FR-15(a)'s test-first-SKIPPED escape hatch is
+for; the four-gate system still gates flip on the runtime-verify and review
+gates passing against the real artifact.
 
 ## Components & interfaces
 The three already-landed artifacts, named and located so the verification plan
 has concrete observation points.
 
-1. **`scripts/implement.sh::record_session_pointer` (existing, lines ~152–177).**
-   Sourced helper called immediately after each `claude -p` invocation in
-   `build_one`, `review_one`, and `verify_runtime_one`. Algorithm:
+1. **`scripts/lib/pause-retry.sh::record_session_pointer` (existing, ~line 320).**
+   Sourced helper, extracted from `scripts/implement.sh` by TDD 0016 and now
+   shared by every gate. Called immediately after each `claude -p` invocation
+   in `build_one`, `review_one`, and `verify_runtime_one` — all three of
+   which themselves live in `scripts/lib/gates.sh` (extracted by TDD 0017).
+   Algorithm:
    - Encode `$PWD`: `enc="$(printf '%s' "$PWD" | sed 's|/|-|g')"`.
    - Look in `${HOME}/.claude/projects/$enc` for `.jsonl` files modified at or
      after the call's start epoch; pick the newest.
@@ -103,23 +115,26 @@ Build phase, in order:
 
 1. **Test-first emission.** End the build with
    `TEST_FIRST: SKIPPED no-new-behavior (covered by existing implementation
-   72192b9; TDD 0010 scope is tests + verification + design record)`. The
-   runner's gate-1-classify accepts this exact signal per FR-15(a).
+   72192b9 + lib extraction in TDDs 0016/0017; TDD 0010 scope is tests +
+   design pointer)`. The runner's gate-1-classify accepts this exact signal
+   per FR-15(a).
 2. **Add `tests/build-observability.test.sh`** with the six cases above.
    Each case is its own subshell; failures don't cascade. Total run time
    target: under 5 seconds (fixtures are tiny pre-canned JSONLs in
    `tests/fixtures/`).
-3. **Promote ADR 0005** by invoking the `throughline:adr-new` skill (already
-   invoked at design time — see "Decisions to promote"). The ADR file +
-   `INDEX.md` update ride in this TDD's design PR, so they're already on
-   disk when `/implement` runs.
-4. **No changes to `scripts/implement.sh`, `scripts/build-prompt.md`, or
-   `scripts/verify-runtime-prompt.md`.** Existing impl is correct against
-   FR-36..38; this TDD adds only tests + ADR + the design record itself.
+3. **No ADR work in this build.** ADR 0005 is already accepted on the
+   integration branch (commit 1482eef); this TDD references it as a
+   static design record, it does NOT promote it.
+4. **No changes to `scripts/lib/pause-retry.sh`, `scripts/lib/gates.sh`,
+   `scripts/build-prompt.md`, or `scripts/verify-runtime-prompt.md`.**
+   Existing impl is correct against FR-36..38; this TDD adds only tests
+   + the design-pointer comment in §5.
 5. **Docs sync (in-commit).** Add a one-line mention of TDD 0010 to
    `scripts/implement.sh`'s file-header comment block under the existing
    "four independent gates" enumeration — not new gates, just a pointer
-   that gate observability is governed by FR-36 / TDD 0010.
+   that gate observability is governed by FR-36 / TDD 0010 (with the
+   implementation now in `scripts/lib/pause-retry.sh` /
+   `scripts/lib/gates.sh`, not inline in `implement.sh`).
 
 ## Failure modes & edge cases
 - **Encoded project dir exists but is empty (no `.jsonl`).** `find` returns
@@ -190,7 +205,7 @@ and `docs/adr/INDEX.md` listing.
 ## Requirement traceability
 | PRD | Design element |
 |---|---|
-| FR-36 Gate-log session pointer | `scripts/implement.sh::record_session_pointer` (existing) called from `build_one` / `review_one` / `verify_runtime_one`; tests case 1–4 in `tests/build-observability.test.sh` |
+| FR-36 Gate-log session pointer | `scripts/lib/pause-retry.sh::record_session_pointer` (existing; extracted from `implement.sh` by TDD 0016) called from `build_one` / `review_one` / `verify_runtime_one` in `scripts/lib/gates.sh` (extracted by TDD 0017); tests case 1–4 in `tests/build-observability.test.sh` |
 | FR-37 Build-phase boundaries | `scripts/build-prompt.md` "Build-phase boundaries" section (existing); test case 5 verifies file contents; ADR 0005 promotes the underlying principle (prompt enforcement + downstream detection, no sandboxing) |
 | FR-38 Cleanup safety in runtime-verify | `scripts/verify-runtime-prompt.md` "Cleanup safety" paragraph (existing); test case 6 verifies file contents; ADR 0005 also covers |
 
@@ -228,13 +243,16 @@ ADR 0004 to gate scope and complements rather than supersedes it.
   mention of TDD 0010 in the file-header "four independent gates"
   enumeration per Sequencing §5
 
-Note: the design-record artifacts the TDD also produces
-(`docs/adr/0005-gate-scope-enforced-by-prompt-not-sandbox.md` and the
-`docs/adr/INDEX.md` row update) ride in this TDD's design PR and are
-already on disk before `/implement` runs; they are NOT touched-files for
-the *build* phase. The three already-landed prompt-side artifacts
-(`scripts/implement.sh::record_session_pointer`, the build-prompt and
-verify-runtime-prompt boundaries) are unchanged per Sequencing §4.
+Note: ADR 0005 (`docs/adr/0005-gate-scope-enforced-by-prompt-not-sandbox.md`)
+and its `docs/adr/INDEX.md` row already landed on the integration branch
+in commit 1482eef; they are NOT touched-files for this TDD's build phase.
+The already-landed runtime artifacts —
+`scripts/lib/pause-retry.sh::record_session_pointer` (extracted by TDD
+0016), the `build_one` / `review_one` / `verify_runtime_one` gate
+orchestration in `scripts/lib/gates.sh` (extracted by TDD 0017), the
+"Build-phase boundaries" section in `scripts/build-prompt.md`, and the
+"Cleanup safety" paragraph in `scripts/verify-runtime-prompt.md` — are
+all unchanged per Sequencing §4.
 
 Total: 3 files touched (or 8 if each fixture file is counted
 individually; the fixtures are small pre-canned JSONLs under
@@ -257,8 +275,12 @@ the 8-file default soft cap when fixtures are counted individually,
 within the cap when the fixtures directory is counted as one entry.
 
 ## Decisions to promote (ADR candidates)
-**ADR 0005 — "Gate scope enforced by prompt + downstream detection, not
-sandboxing"** (proposed `accepted`).
+**ADR 0005 — already accepted on the integration branch (commit 1482eef).**
+This TDD does NOT propose new ADRs; ADR 0005 was promoted in the TDDs
+0009 + 0010 design PR and is referenced here for traceability only. The
+content below is preserved as the historical promotion record for that
+ADR (no action for `/implement`).
+
 - *Context*: PR #24's post-mortem of the TDD 0008 build failure surfaced the
   question of how throughline enforces what each gate may or may not do (e.g.,
   build cannot drive the artifact; runtime-verify cannot pkill the parent).

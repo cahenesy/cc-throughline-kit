@@ -71,11 +71,13 @@ The draft is a single JSON object. Schema `1`:
 ```
 
 Field semantics:
-- `schema`: integer `1`. Same versioning policy as TDD 0011: additive
-  fields stay at `1`; breaking changes bump and the skill on resume
-  refuses an incompatible schema with the message
-  `draft schema X not compatible with this plugin version; discard and
-  start fresh? (y/N)`.
+- `schema`: integer `1`. Same versioning policy as TDD 0011 (already
+  implemented at `scripts/lib/state.sh:295` for paused-run fragments):
+  additive fields stay at `1`; breaking changes bump and the skill on
+  resume refuses an incompatible schema. Refusal message mirrors the
+  runner's wording for parity:
+  `draft schema 'X' not compatible with this plugin version; discard and
+  start fresh? (y/N) (see docs/tdd/0012)`.
 - `skill`: literal `prd-author` or `tdd-author`. A loaded draft whose
   `skill` mismatches the invoking skill is treated as not-mine (the
   skill warns and ignores). This is defense against a future third
@@ -136,10 +138,12 @@ Field semantics:
    - `tl_draft_append_elicit <skill-name> <kind> <header> <question> <answer>`
      → atomically appends one entry to `interview[]` with the current
      epoch as `ts`, writes via `tmp + mv`. Uses `python3` if available
-     (single-line program); falls back to a bash JSON-builder (using
-     the existing `json_escape` from `scripts/implement.sh` — promoted
-     into this helper so both skills and the runner share one
-     escaper).
+     (single-line program); falls back to a bash JSON-builder using
+     the existing `json_escape` from `scripts/lib/state.sh` (extracted
+     there by TDD 0015 — TDD 0012 consumes it directly rather than
+     re-promoting it). `drafts.sh` sources `state.sh` once at the top
+     so both the runner and the skills share one escaper without
+     duplicating the function.
 
    - `tl_draft_write_doc <skill-name> <doc-path-or-stdin>` →
      replaces `draft_doc` with the contents of the file (or stdin if
@@ -161,12 +165,14 @@ Field semantics:
      the first substantive elicitation, breaking FR-46's negative
      acceptance criterion.
 
-3. **`json_escape` promoted from `scripts/implement.sh` to
-   `scripts/lib/json-escape.sh`** (sourced from both the runner and
-   `drafts.sh`). The runner sources the new helper and removes its
-   inline copy; behavior is byte-identical. Test (in the gate test
-   suite) confirms the helper produces the same output as the
-   pre-change inline function on the existing test inputs.
+3. **`json_escape` already lives in `scripts/lib/state.sh`** (extracted
+   from `scripts/implement.sh` by TDD 0015 — `scripts/lib/state.sh:84`).
+   `drafts.sh` sources `state.sh` once at its top to consume the same
+   escaper. No new helper file, no behavioral change, no Touched-files
+   entry for an escaper-promotion step. (The original draft of this
+   TDD planned to promote `json_escape` to its own
+   `scripts/lib/json-escape.sh` — that work is obsolete now that TDD
+   0015's state-lib extraction already shares the function.)
 
 4. **`skills/prd-author/SKILL.md` (modified).** Five concrete prompt
    edits, each surrounded by adjacent existing text so the change is
@@ -243,9 +249,10 @@ Field semantics:
      session has no prior verdict to consider reusing; the cheapest
      correct behavior is to not write it down."
 
-6. **No changes to `scripts/implement.sh` beyond promoting
-   `json_escape` to the shared lib.** The runner does not interact
-   with these drafts directly; FR-46..50 are entirely skill-side.
+6. **No changes to `scripts/implement.sh`.** The runner does not
+   interact with these drafts directly; FR-46..50 are entirely
+   skill-side. (`json_escape` was extracted into `scripts/lib/state.sh`
+   by TDD 0015 — already shared, no further runner change needed.)
 
 ## Data & state
 
@@ -277,25 +284,31 @@ Field semantics:
 
 ## Sequencing / implementation plan
 
-1. **Promote `json_escape` to `scripts/lib/json-escape.sh`.** Land with
-   the existing runner test still green. No behavior change; this is a
-   prerequisite for `drafts.sh`.
-2. **`scripts/lib/repo-id.sh::tl_drafts_dir`.** Land with a test that
+**Build-order constraint.** TDD 0009 (install/update lifecycle hygiene)
+must land first: it owns `scripts/lib/repo-id.sh::tl_repo_id` and the
+`${CLAUDE_PLUGIN_DATA}/<repo-id>/` path convention this TDD extends with
+`tl_drafts_dir`. If 0012 is queued ahead of 0009 the build will fail at
+its first `tl_repo_id` reference. (`json_escape` is already in
+`scripts/lib/state.sh` per TDD 0015 — no prerequisite there.)
+
+1. **`scripts/lib/repo-id.sh::tl_drafts_dir`.** Add the new function next
+   to `tl_repo_id` (introduced by TDD 0009). Land with a test that
    asserts the function creates the directory and returns its absolute
    path when `CLAUDE_PLUGIN_DATA` is set + writable; returns non-zero
    with stderr when unset.
-3. **`scripts/lib/drafts.sh`.** Land with one test per function: init,
-   exists, append, write_doc, summary (with `python3` and the bash
-   fallback both exercised), read, discard. Each is a small subshell
-   case that exits 0 / non-zero distinctly.
-4. **`skills/prd-author/SKILL.md` edits.** Verification is by reading
+2. **`scripts/lib/drafts.sh`.** Source `scripts/lib/state.sh` at the top to
+   reuse `json_escape`. Land with one test per function: init, exists,
+   append, write_doc, summary (with `python3` and the bash fallback both
+   exercised), read, discard. Each is a small subshell case that exits
+   0 / non-zero distinctly.
+3. **`skills/prd-author/SKILL.md` edits.** Verification is by reading
    the file back (no LLM call needed): the five inserted blocks contain
    the required keywords (`Resume check`, `tl_draft_append_elicit`,
    `re-read the draft`, `Self-review reads the draft`,
    `tl_draft_discard`).
-5. **`skills/tdd-author/SKILL.md` edits.** Same verification approach
+4. **`skills/tdd-author/SKILL.md` edits.** Same verification approach
    plus the PRD-drift and FR-50 (no-verdict-persistence) lines.
-6. **End-to-end smoke (manual, recorded in verification plan).** Run
+5. **End-to-end smoke (manual, recorded in verification plan).** Run
    `/prd-author` against a fixture repo; answer 2 questions; kill the
    session. Re-invoke `/prd-author`; observe the resume prompt with
    the count-of-elicitations summary; choose Resume; confirm the
@@ -459,8 +472,9 @@ here — delegated, not bundled, per FR-26 / ADR 0004.)
 
 **No new external dependencies.**
 
-- `repo-id.sh` and `json_escape` are existing throughline helpers
-  (TDD 0009 + the runner's inline function being promoted).
+- `repo-id.sh` (TDD 0009) and `scripts/lib/state.sh::json_escape`
+  (extracted there by TDD 0015) are existing throughline helpers;
+  `drafts.sh` consumes both rather than duplicating them.
 - `python3` is optional (the existing runner already uses the
   `jq → python3 → bash` cascade); `drafts.sh`'s reader functions
   follow the same cascade.
@@ -516,37 +530,31 @@ No `BLOCKERS.md` entries to resolve.
 ## Touched files
 
 - `scripts/lib/repo-id.sh` (modified, additive) — new `tl_drafts_dir`
-  function per Components §1
+  function per Components §1 (file itself is introduced by TDD 0009;
+  this TDD's build must run after 0009)
 - `scripts/lib/drafts.sh` (new) — seven `tl_draft_*` helper functions
-  per Components §2
-- `scripts/lib/json-escape.sh` (new) — `json_escape` promoted from
-  `scripts/implement.sh` per Components §3
-- `scripts/implement.sh` (modified) — removes inline `json_escape`,
-  sources the new helper per Components §3 + §6
+  per Components §2; sources `scripts/lib/state.sh` for `json_escape`
 - `skills/prd-author/SKILL.md` (modified) — five concrete prompt edits
   per Components §4
 - `skills/tdd-author/SKILL.md` (modified) — five concrete prompt edits
   + two skill-specific tweaks per Components §5
 
-Total: 6 files touched.
+Total: 4 files touched. (Prior draft listed 6 files; the
+`scripts/lib/json-escape.sh` promotion + `scripts/implement.sh` edit
+were dropped because TDD 0015 already extracted `json_escape` into
+`scripts/lib/state.sh`.)
 
 ## Expected diff size
 
 - `scripts/lib/repo-id.sh` — ~15 lines added (one function)
-- `scripts/lib/drafts.sh` — ~180 lines added (seven helper functions;
-  this is a meaty new helper file)
-- `scripts/lib/json-escape.sh` — ~25 lines (new, code-move from
-  `implement.sh`) (exception: legitimately-wide code move; pure
-  promotion of `json_escape`, behavior byte-identical, verified by the
-  gate test suite per Components §3)
-- `scripts/implement.sh` — ~-25 lines (remove inline copy + add source
-  line); net reduction
+- `scripts/lib/drafts.sh` — ~185 lines added (seven helper functions +
+  one `state.sh` source line at top; this is a meaty new helper file)
 - `skills/prd-author/SKILL.md` — ~75 lines added (five prompt edits,
   each a substantive paragraph)
 - `skills/tdd-author/SKILL.md` — ~75 lines added (five prompt edits
   + two skill-specific tweaks)
 
-Total expected diff: ~395 lines across 6 files. All per-file under the
+Total expected diff: ~350 lines across 4 files. All per-file under the
 300-line default `THROUGHLINE_TDD_MAX_FILE_DIFF` bound; no per-file
 exceptions needed.
 
@@ -557,8 +565,9 @@ This TDD's doc body is over the 350-line default
 this TDD was authored before TDD 0014 (the bounds didn't exist when
 this TDD was written). Its substance is a coordinated five-prompt-edit
 operation against both authoring skills (`prd-author` and `tdd-author`)
-plus their shared helper substrate (`scripts/lib/drafts.sh` +
-`json-escape.sh` promotion); the five-edit structure is mirrored in
+plus their shared helper substrate (`scripts/lib/drafts.sh` consuming
+`scripts/lib/state.sh::json_escape` and `scripts/lib/repo-id.sh::
+tl_repo_id` from prior TDDs); the five-edit structure is mirrored in
 both skill files for parallel resume/persist behavior. Splitting at this
 point would either duplicate the helper layer description across two
 TDDs or fragment the prompt-edit set across skills that need consistent
