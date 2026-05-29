@@ -195,10 +195,36 @@ _write_tdd_fragment() {
   fi
 }
 
+# _rework_config_json — emit the §6 rework-config snapshot object from the four
+# env knobs with their defaults (TDD 0019 §6). Recorded once in run.json's
+# config snapshot (below) so any halt citing these values is reproducible from
+# the run-state record alone (ADR 0006). Self-contained (reads env with
+# defaults) so it is correct regardless of caller scope — including the
+# THROUGHLINE_SOURCE_ONLY test path that never runs the implement.sh setup
+# block. The model default `sonnet` resolves to the same alias
+# THROUGHLINE_REVIEW_MODEL resolves to (TDD 0013); only the alias is snapshotted.
+_rework_config_json() {
+  local model="${THROUGHLINE_REWORK_MODEL:-sonnet}"
+  local max="${THROUGHLINE_REWORK_MAX:-3}"
+  local floor="${THROUGHLINE_REWORK_SCOPE_FLOOR:-60}"
+  local factor="${THROUGHLINE_REWORK_SCOPE_FACTOR:-3}"
+  # Guard the three numeric knobs against non-numeric input (bash-arith
+  # injection / malformed config) — fall back to the default + warn, matching
+  # _retry_in_gate's env-validation discipline. The cap/budget math downstream
+  # consumes the snapshot, so a non-numeric value must never reach it.
+  case "$max"    in ''|*[!0-9]*) echo "warning: THROUGHLINE_REWORK_MAX='$max' not numeric; using 3" >&2; max=3 ;; esac
+  case "$floor"  in ''|*[!0-9]*) echo "warning: THROUGHLINE_REWORK_SCOPE_FLOOR='$floor' not numeric; using 60" >&2; floor=60 ;; esac
+  case "$factor" in ''|*[!0-9]*) echo "warning: THROUGHLINE_REWORK_SCOPE_FACTOR='$factor' not numeric; using 3" >&2; factor=3 ;; esac
+  printf '{"model":"%s","max":%d,"scope_floor":%d,"scope_factor":%d}' \
+    "$(json_escape "$model")" "$max" "$floor" "$factor"
+}
+
 # Re-roll the run-level rollup from per-TDD fragments and rewrite run.json.
 # state ∈ {running, done, paused}. Called by state_init (running), at run end
 # (done), and by _enter_paused (paused). When state is paused, pause_started_at
-# is stamped (display only).
+# is stamped (display only). run.json carries a `config` snapshot
+# (TDD 0019 §6) whose `rework_config` makes any rework-budget / scope halt
+# reproducible from the run-state record alone (ADR 0006).
 _write_run_fragment() {
   local state="$1" tmp="$STATE_DIR/run.json.tmp.$$"
   local total="${#TDDS[@]}"
@@ -236,11 +262,12 @@ _write_run_fragment() {
   fi
   # TDD 0011 / iter-3 MAJOR-5: same printf+mv failure handling as
   # _write_tdd_fragment.
-  if ! printf '{"schema":1,"started_at":%d,"updated_at":%d,"pid":%d,"integration_branch":"%s","mode":"%s","change":"%s","logdir":"%s","total":%d,"completed":%d,"failed":%d,"blocked":%d,"skipped":%d,"paused":%d,"state":"%s","pause_started_at":%s}\n' \
+  local rework_config_lit; rework_config_lit="$(_rework_config_json)"
+  if ! printf '{"schema":1,"started_at":%d,"updated_at":%d,"pid":%d,"integration_branch":"%s","mode":"%s","change":"%s","logdir":"%s","total":%d,"completed":%d,"failed":%d,"blocked":%d,"skipped":%d,"paused":%d,"state":"%s","pause_started_at":%s,"config":{"rework_config":%s}}\n' \
     "$STATE_STARTED_AT" "$(date +%s)" "$$" \
     "$(json_escape "$INTEGRATION")" "$STATE_MODE" "$(json_escape "$CHANGE")" "$(json_escape "$LOGDIR")" \
     "$total" "$completed" "$failed" "$blocked" "$skipped" "$paused" \
-    "$(json_escape "$state")" "$pause_started_lit" \
+    "$(json_escape "$state")" "$pause_started_lit" "$rework_config_lit" \
     > "$tmp"; then
     echo "error: _write_run_fragment printf failed; run.json NOT updated" >&2
     rm -f "$tmp" 2>/dev/null || true
