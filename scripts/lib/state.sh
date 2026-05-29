@@ -790,6 +790,27 @@ _extract_token_spend() {  # <session-json-path>
   esac
 }
 
+# _rework_attempt_count_peek <slug> <gate> <step>  — read-only counterpart of
+# _rework_attempt_count below: echoes the persisted attempt count for the given
+# key (0 if absent or no fragment yet) WITHOUT incrementing or rewriting the
+# fragment. _rework_loop calls this on entry to seed its local `attempts` from
+# state so a pause+resume preserves the budget across invocations — the
+# pre-fix bug (TDD 0019 review-rerun finding 1) was that the local `attempts=0`
+# initialization shadowed the persisted counter, granting one extra rework
+# beyond THROUGHLINE_REWORK_MAX after every resume. Safe to call without a
+# fragment file (returns 0; the loop starts fresh, identical to pre-fix
+# semantics in the no-prior-state case).
+_rework_attempt_count_peek() {  # <slug> <gate> <step>
+  local slug="$1" gate="$2" step="$3"
+  local f="${STATE_DIR:-}/$slug.json" key="$gate:$step" obj cur
+  if [ -z "${STATE_DIR:-}" ] || [ ! -f "$f" ]; then echo 0; return 0; fi
+  obj="$(_read_fragment_raw_object "$f" rework_attempts)"
+  [ -z "$obj" ] && { echo 0; return 0; }
+  cur="$(printf '%s' "$obj" | sed -n "s/.*\"$key\":\\([0-9]*\\).*/\\1/p" | head -1)"
+  [ -z "$cur" ] && cur=0
+  echo "$cur"
+}
+
 # _rework_attempt_count <slug> <gate> <step>  — increment the per-(gate,step)
 # attempt counter in rework_attempts and echo the NEW value. The key is
 # "<gate>:<step>". Used by the loop to enforce THROUGHLINE_REWORK_MAX (FR-65).

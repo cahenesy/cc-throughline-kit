@@ -427,9 +427,22 @@ _rework_one() {  # <tdd> <log> <finding-ref> <finding-text> <cap>
   prompt="${prompt//\{\{FINDING\}\}/[$finding_ref] $finding_text}"
   local args=(-p "$prompt" --permission-mode auto)
   [ -n "$rm" ] && args+=(--model "$rm")
-  local start; start=$(date +%s)
-  claude "${args[@]}" >>"$log" 2>&1
+  local start _rc; start=$(date +%s); _rc=0
+  # Capture claude's exit code BEFORE record_session_pointer + git rev-parse
+  # consume it. Pre-fix this function ended with `git rev-parse HEAD` (always
+  # rc=0 inside a repo), which masked claude crashes from the caller — the
+  # MAJOR-4 guard at the call site only fired on the template-not-found path
+  # above, not on a claude subprocess failure (TDD 0019 review-rerun finding
+  # 3). Now: a non-zero claude rc is logged AND propagated, so the caller's
+  # "rework invocation failed" diagnostic path catches both failure modes
+  # uniformly. On success we still echo HEAD so the caller can detect
+  # empty-vs-shipped reworks via $new_head comparison.
+  claude "${args[@]}" >>"$log" 2>&1; _rc=$?
   record_session_pointer "$log" "$start"
+  if [ "$_rc" -ne 0 ]; then
+    echo "warning: _rework_one: claude subprocess exited rc=$_rc (no rework commit; caller will treat as invocation failure)" >>"$log"
+    return "$_rc"
+  fi
   git rev-parse HEAD 2>/dev/null
 }
 
@@ -494,18 +507,50 @@ _rework_loop() {  # <slug> <tdd> <rbase> <log>
   # the loop's state writes.
   case "$step" in ''|*[!0-9]*) step=1 ;; esac
   local max="${THROUGHLINE_REWORK_MAX:-3}"; case "$max" in ''|*[!0-9]*) max=3 ;; esac
-  local build_start="$rbase" cleared attempts=0 rrc rs _retries_json
+  local build_start="$rbase" cleared attempts rrc rs _retries_json
+  # Seed `attempts` from the PERSISTED counter so a pause+resume preserves the
+  # budget across invocations (TDD 0019 review-rerun finding 1). The pre-fix
+  # `attempts=0` initialization shadowed the fragment's recorded count, so a
+  # rework loop that paused at 3/3 would resume at 0/3 and grant one extra
+  # attempt before the next budget check. _rework_attempt_count_peek returns 0
+  # cleanly when no fragment exists, so a fresh loop still starts at 0.
+  attempts="$(_rework_attempt_count_peek "$slug" "$gate" "$step")"
   cleared="$(git rev-parse HEAD 2>/dev/null || echo "$rbase")"
   while true; do
+    # Snapshot the log size BEFORE this pass so we can tell a fresh verdict
+    # (claude ran and wrote REVIEW_RESULT this pass) from a stale one (claude
+    # crashed; review_status would otherwise pick up a prior iteration's verdict
+    # from the cumulative log — TDD 0019 review-rerun finding 2). Used below to
+    # distinguish "BLOCK verdict, rework normally" from "claude crashed, fail".
+    local pre_log_size verdict_in_new
+    pre_log_size="$(wc -c < "$log" 2>/dev/null || echo 0)"
     _retry_in_gate _review_one_gated "$gate" "$slug" "$log" "$tdd" "$rbase" "$log"
     rrc=$?
     [ "$rrc" -eq 2 ] && return 2          # transient pause (NFR-4: not a fail)
-    _retries_json="$(_read_fragment_raw_array "${STATE_DIR:-}/$slug.json" retries 2>/dev/null)"
-    if [ "$rrc" -ne 0 ] && [ -n "$_retries_json" ] && [ "$_retries_json" != "[]" ]; then
-      _terminal_state "$slug" failed "" "review gate fatal exit after retries (rc=$rrc)"
+    # _review_one_gated returns 1 for BOTH "BLOCK verdict" and "claude crashed,
+    # fatal-classified" — _retry_in_gate then returns 1 in both cases. The
+    # ORIGINAL guard `if rrc != 0 && retries != []` only fired on the
+    # post-retries fatal path, so a fatal crash with empty retries[] fell
+    # through to `review_status "$log"`, which would read a stale REVIEW_RESULT
+    # from a PRIOR rework iteration and rework against it (finding 2). We
+    # distinguish by checking the NEWLY-APPENDED log slice: if it contains a
+    # fresh REVIEW_RESULT line, claude wrote a verdict this pass (BLOCK,
+    # legitimate rework trigger); if not, claude crashed silently (fail the
+    # gate). The retries-recorded check stays for diagnostic clarity but
+    # becomes a refinement of the fail path, not the only fail trigger.
+    verdict_in_new="$(tail -c +"$((pre_log_size + 1))" "$log" 2>/dev/null | grep -aE '^REVIEW_RESULT:' | tail -1)"
+    if [ "$rrc" -ne 0 ] && [ -z "$verdict_in_new" ]; then
+      _retries_json="$(_read_fragment_raw_array "${STATE_DIR:-}/$slug.json" retries 2>/dev/null)"
+      if [ -n "$_retries_json" ] && [ "$_retries_json" != "[]" ]; then
+        _terminal_state "$slug" failed "" "review gate fatal exit after retries (rc=$rrc; no fresh verdict)"
+      else
+        _terminal_state "$slug" failed "" "review gate fatal exit, no retries recorded and no fresh verdict (rc=$rrc)"
+      fi
       return 1
     fi
-    rs="$(review_status "$log")"
+    # Prefer the fresh-pass verdict over the cumulative log tail; review_status
+    # is the legacy fallback for callers that didn't snapshot pre_log_size.
+    rs="${verdict_in_new:-$(review_status "$log")}"
     case "$rs" in
       *PASS*)  return 0 ;;
       *BLOCK*) : ;;
