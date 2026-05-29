@@ -159,14 +159,32 @@ test_first_ok() {  # <base-ref> <log>
   git log --format='%s' "$base..HEAD" 2>/dev/null | grep -qiE '^test\(failing\)' && return 0
   return 1
 }
+# TDD 0019 carry-over fix 1 (TDD 0017 review): propagate git failures. The git
+# add / commit were redirected to the log with no exit-code check, so a failed
+# flip commit returned the prior command's 0 and the runner reported a false
+# `OK (verified + reviewed)`. Return non-zero on either failure so the caller
+# (gate_one's flip site) halts honestly.
 flip_status() {  # <tdd> <log>
   local tdd="$1" log="$2"
   sed -i.bak -E 's/^Status:[[:space:]]*(draft|ready)/Status: implemented/' "$tdd" && rm -f "$tdd.bak"
-  git add "$tdd" >>"$log" 2>&1
-  git commit -m "mark $(basename "$tdd" .md) implemented (verified + reviewed)" >>"$log" 2>&1
+  if ! git add "$tdd" >>"$log" 2>&1; then
+    echo "flip_status: git add failed for $tdd" >>"$log"; return 1; fi
+  if ! git commit -m "mark $(basename "$tdd" .md) implemented (verified + reviewed)" >>"$log" 2>&1; then
+    echo "flip_status: git commit failed for $tdd (nothing to commit? hook?)" >>"$log"; return 1; fi
+  return 0
 }
+# TDD 0019 carry-over fix 3 (TDD 0017 review): drop the ${MAINREPO:-$PWD}
+# fallback. In parallel mode $PWD is the throwaway worktree, so a blocker would
+# land in the worktree's BLOCKERS.md and be deleted with it. MAINREPO is set
+# unconditionally by implement.sh startup; fail loud if it is somehow empty
+# rather than write to the wrong tree.
 record_blocker() {  # <tdd> <reason>  -> append to the main repo's blocker ledger
-  local tdd="$1" reason="$2" bf="${MAINREPO:-$PWD}/docs/tdd/BLOCKERS.md"
+  local tdd="$1" reason="$2"
+  if [ -z "${MAINREPO:-}" ]; then
+    echo "FATAL: record_blocker: MAINREPO unset; refusing to write BLOCKERS.md to the worktree ($PWD)" >&2
+    return 1
+  fi
+  local bf="$MAINREPO/docs/tdd/BLOCKERS.md"
   mkdir -p "$(dirname "$bf")"
   [ -f "$bf" ] || printf '# Implementation blockers\n\n> Design-level blockers raised by /implement. Resolve via /tdd-author, then delete the entry.\n\n' > "$bf"
   printf -- '- [ ] **%s** (%s): %s\n' "$(basename "$tdd")" "$(date +%Y-%m-%d)" "$reason" >> "$bf"
@@ -193,8 +211,14 @@ install_deps() {  # <log>
   echo "install_deps: $cmd" >>"$log"
   # Fall back to a plain install if the locked/frozen form fails (e.g. a lockfile
   # that's out of sync) so a build isn't blocked by a lock mismatch.
-  sh -c "$cmd" >>"$log" 2>&1 || sh -c "$pm install" >>"$log" 2>&1 \
-    || echo "install_deps: dependency install failed; build may fail at verify" >>"$log"
+  # TDD 0019 carry-over fix 2 (TDD 0017 review): when BOTH attempts fail, the
+  # final `echo` used to return 0 (the echo's exit), so a total install failure
+  # looked like success. Track the outcome and return non-zero; callers in
+  # implement.sh already check the rc.
+  if sh -c "$cmd" >>"$log" 2>&1; then return 0; fi
+  if sh -c "$pm install" >>"$log" 2>&1; then return 0; fi
+  echo "install_deps: dependency install failed; build may fail at verify" >>"$log"
+  return 1
 }
 
 # --- gate-call wrappers used by _retry_in_gate (TDD 0011 / FR-42) ------------

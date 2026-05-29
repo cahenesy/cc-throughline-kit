@@ -259,6 +259,15 @@ _resume_from() {
 gate_one() {  # <tdd> <review-base-ref> <log>
   local tdd="$1" rbase="$2" log="$3" bs rs rvs slug rrc _retries_json=""
   slug="$(basename "$tdd" .md)"
+  # TDD 0019 carry-over fix 4 (TDD 0017 review): STATE_DIR is the resume entry's
+  # one hard precondition — state_init sets it unconditionally. An unset
+  # STATE_DIR would otherwise expand `${STATE_DIR:-}/$slug.json` to `/$slug.json`
+  # (or trip `set -u` in set_tdd_meta) and silently corrupt progress tracking.
+  # Fail loud instead so a misconfigured caller halts rather than misclassifies.
+  if [ -z "${STATE_DIR:-}" ]; then
+    echo "FATAL: gate_one: STATE_DIR unset (state_init must run before any gate)" >&2
+    return 1
+  fi
   # TDD 0011 / MA-4 belt-and-suspenders: refuse to process a slug whose state
   # fragment is missing. state_init's queue-freeze should have dropped any
   # newly-added TDDs from TDDS on resume, but defending here means a stray
@@ -297,7 +306,7 @@ gate_one() {  # <tdd> <review-base-ref> <log>
     # an old BLOCKED from attempt 1 and corrupt BLOCKERS.md). Without
     # retries, the log's latest verdict IS the only verdict and can be
     # trusted. Use the fragment's retries[] count as the proxy.
-    _retries_json="$(_read_fragment_raw_array "${STATE_DIR:-}/$slug.json" retries 2>/dev/null)"
+    _retries_json="$(_read_fragment_raw_array "$STATE_DIR/$slug.json" retries 2>/dev/null)"
     if [ "$rrc" -ne 0 ] && [ -n "$_retries_json" ] && [ "$_retries_json" != "[]" ]; then
       _terminal_state "$slug" failed "" "build gate fatal exit after retries (rc=$rrc)"
       echo "FAIL build (fatal exit after retries; see log)"; return 1
@@ -350,7 +359,7 @@ gate_one() {  # <tdd> <review-base-ref> <log>
     # TDD 0011 / iter-6 MAJOR-1: only bypass log-verdict scan when retries
     # occurred (cumulative log may carry stale entries). Same proxy as
     # gate 1.
-    _retries_json="$(_read_fragment_raw_array "${STATE_DIR:-}/$slug.json" retries 2>/dev/null)"
+    _retries_json="$(_read_fragment_raw_array "$STATE_DIR/$slug.json" retries 2>/dev/null)"
     if [ "$rrc" -ne 0 ] && [ -n "$_retries_json" ] && [ "$_retries_json" != "[]" ]; then
       _terminal_state "$slug" failed "" "runtime-verify gate fatal exit after retries (rc=$rrc)"
       echo "FAIL runtime-verify (fatal exit after retries; see log)"; return 1
@@ -386,14 +395,20 @@ gate_one() {  # <tdd> <review-base-ref> <log>
       *) # _rework_loop already recorded the halt cause + BLOCKERS entry +
          # blocked/failed terminal state; surface a one-line verdict for the
          # report from the fragment's recorded cause.
-         local _hc; _hc="$(_read_fragment_field "${STATE_DIR:-}/$slug.json" halt_cause 2>/dev/null)"
+         local _hc; _hc="$(_read_fragment_field "$STATE_DIR/$slug.json" halt_cause 2>/dev/null)"
          if [ -n "$_hc" ]; then echo "BLOCKED review ($_hc)"; else echo "FAIL review (see log)"; fi
          return 1 ;;
     esac
   fi
 
   set_tdd_state "$slug" reviewing flip
-  flip_status "$tdd" "$log"
+  # TDD 0019 carry-over fix 1: a failed flip commit must halt honestly, not
+  # report a false OK. flip_status now returns non-zero on git add/commit
+  # failure; mark the TDD failed and do NOT flip.
+  if ! flip_status "$tdd" "$log"; then
+    _terminal_state "$slug" failed "" "flip commit failed (status NOT flipped; see log)"
+    echo "FAIL flip (could not commit the implemented flip; see log)"; return 1
+  fi
   _terminal_state "$slug" "done" "" "OK (verified + reviewed)"
   echo "OK (verified + reviewed)"; return 0
 }
