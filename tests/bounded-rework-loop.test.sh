@@ -259,6 +259,151 @@ echo "[B9] _set_build_attempt_token_spend records build_attempt.token_spend"
     && ok "null token_spend recorded as null" || bad "null token_spend should write {\"token_spend\":null}"
 ) || true
 
+# --- §1 / FR-66, FR-67: scope cap + touched-file + per-file-bound pre-pass ----
+echo "[C1] _rework_scope_cap = max(floor, factor × region)"
+( D="$ROOT/C1"; mkdir -p "$D/state.d"
+  export STATE_DIR="$D/state.d" STATE_STARTED_AT=1000 STATE_MODE="sequential"
+  export INTEGRATION="master" CHANGE="ci" LOGDIR="$D"
+  TDDS=()
+  THROUGHLINE_SOURCE_ONLY=1 source "$IMPL" || { bad "source guard missing"; exit 0; }
+  [ "$(_rework_scope_cap 8)" = "60" ] && ok "region 8 → cap 60 (floor wins)" || bad "cap(8) should be 60 (got '$(_rework_scope_cap 8)')"
+  [ "$(_rework_scope_cap 40)" = "120" ] && ok "region 40 → cap 120 (factor wins)" || bad "cap(40) should be 120 (got '$(_rework_scope_cap 40)')"
+  [ "$(_rework_scope_cap '')" = "60" ] && ok "empty region → floor 60" || bad "cap('') should be 60 (got '$(_rework_scope_cap '')')"
+) || true
+
+# Set up a git repo + scope-declaring TDD IN PWD (caller must `cd` into a fresh
+# dir FIRST — never run these git commits in the real repo). Leaves PWD in the
+# repo with HEAD at the build-start commit.
+mk_rework_repo() {
+  git init -q -b master; git config user.email t@t.t; git config user.name t
+  printf 'base\n' > base.txt; git add -A; git commit -qm base >/dev/null
+  mkdir -p docs/tdd
+  cat > docs/tdd/0099-fix.md <<'EOF'
+# TDD 0099: fixture
+Status: draft
+
+## Touched files
+- `src/a.txt` (post) — the in-scope file
+- `src/b.txt` — another in-scope file
+
+## Expected diff size
+- `src/a.txt` — ~50 lines added
+- `src/b.txt` — ~200 lines added (exception: legitimately wide)
+EOF
+  git add -A; git commit -qm "build start: declare scope" >/dev/null
+}
+
+echo "[C2] _rework_touched_files parses the declared set"
+( D="$ROOT/C2"; mkdir -p "$D/state.d"; cd "$D" || { bad "cd failed"; exit 0; }
+  export STATE_DIR="$D/state.d" STATE_STARTED_AT=1000 STATE_MODE="sequential"
+  export INTEGRATION="master" CHANGE="ci" LOGDIR="$D"
+  TDDS=()
+  THROUGHLINE_SOURCE_ONLY=1 source "$IMPL" || { bad "source guard missing"; exit 0; }
+  mk_rework_repo
+  files="$(_rework_touched_files docs/tdd/0099-fix.md | tr '\n' ',')"
+  [ "$files" = "src/a.txt,src/b.txt," ] && ok "touched-file set parsed" \
+    || bad "touched set should be src/a.txt,src/b.txt (got '$files')"
+) || true
+
+echo "[C3] _rework_pre_pass clears a small in-scope rework commit"
+( D="$ROOT/C3"; mkdir -p "$D/state.d"; cd "$D" || { bad "cd failed"; exit 0; }
+  export STATE_DIR="$D/state.d" STATE_STARTED_AT=1000 STATE_MODE="sequential"
+  export INTEGRATION="master" CHANGE="ci" LOGDIR="$D"
+  TDDS=()
+  THROUGHLINE_SOURCE_ONLY=1 source "$IMPL" || { bad "source guard missing"; exit 0; }
+  mk_rework_repo; BS="$(git rev-parse HEAD)"
+  mkdir -p src; printf 'l1\nl2\nl3\nl4\nl5\n' > src/a.txt
+  git add -A; git commit -qm "rework: fix the cited finding" >/dev/null
+  NH="$(git rev-parse HEAD)"
+  out="$(_rework_pre_pass 0099-fix docs/tdd/0099-fix.md "$NH" "$BS" "$BS" 8)"; rc=$?
+  [ "$rc" -eq 0 ] && ok "pre-pass returns 0 (clear)" || bad "pre-pass should clear (rc=$rc, out=$out)"
+  [ -z "$out" ] && ok "no PRECHECK_FAIL emitted on clear" || bad "clear pre-pass should emit nothing (got: $out)"
+) || true
+
+echo "[C4] _rework_pre_pass rejects an oversized rework (FR-66 scope cap)"
+( D="$ROOT/C4"; mkdir -p "$D/state.d"; cd "$D" || { bad "cd failed"; exit 0; }
+  export STATE_DIR="$D/state.d" STATE_STARTED_AT=1000 STATE_MODE="sequential"
+  export INTEGRATION="master" CHANGE="ci" LOGDIR="$D"
+  TDDS=()
+  THROUGHLINE_SOURCE_ONLY=1 source "$IMPL" || { bad "source guard missing"; exit 0; }
+  mk_rework_repo; BS="$(git rev-parse HEAD)"
+  mkdir -p src; seq 1 200 > src/a.txt   # 200 lines for an 8-line region (cap=60)
+  git add -A; git commit -qm "rework: oversized" >/dev/null
+  NH="$(git rev-parse HEAD)"
+  out="$(_rework_pre_pass 0099-fix docs/tdd/0099-fix.md "$NH" "$BS" "$BS" 8)"; rc=$?
+  [ "$rc" -ne 0 ] && ok "pre-pass returns non-zero on oversized" || bad "oversized pre-pass should be non-zero"
+  printf '%s\n' "$out" | grep -q 'PRECHECK_FAIL: rework-scope-exceeded' \
+    && ok "emits rework-scope-exceeded" || bad "should emit rework-scope-exceeded (got: $out)"
+) || true
+
+echo "[C5] _rework_pre_pass rejects an out-of-set file as structural(a)"
+( D="$ROOT/C5"; mkdir -p "$D/state.d"; cd "$D" || { bad "cd failed"; exit 0; }
+  export STATE_DIR="$D/state.d" STATE_STARTED_AT=1000 STATE_MODE="sequential"
+  export INTEGRATION="master" CHANGE="ci" LOGDIR="$D"
+  TDDS=()
+  THROUGHLINE_SOURCE_ONLY=1 source "$IMPL" || { bad "source guard missing"; exit 0; }
+  mk_rework_repo; BS="$(git rev-parse HEAD)"
+  mkdir -p src; printf 'x\n' > src/c.txt   # c.txt is NOT in the touched-file set
+  git add -A; git commit -qm "rework: edits out-of-set file" >/dev/null
+  NH="$(git rev-parse HEAD)"
+  out="$(_rework_pre_pass 0099-fix docs/tdd/0099-fix.md "$NH" "$BS" "$BS" 8)"; rc=$?
+  [ "$rc" -ne 0 ] && ok "pre-pass non-zero on out-of-set file" || bad "out-of-set should be non-zero"
+  printf '%s\n' "$out" | grep -qE 'PRECHECK_FAIL: structural-finding\(a\) src/c.txt' \
+    && ok "emits structural-finding(a) naming the file" || bad "should emit structural-finding(a) src/c.txt (got: $out)"
+) || true
+
+echo "[C6] _rework_pre_pass rejects an over-bound file as structural(b)"
+( D="$ROOT/C6"; mkdir -p "$D/state.d"; cd "$D" || { bad "cd failed"; exit 0; }
+  export STATE_DIR="$D/state.d" STATE_STARTED_AT=1000 STATE_MODE="sequential"
+  export INTEGRATION="master" CHANGE="ci" LOGDIR="$D"
+  TDDS=()
+  THROUGHLINE_SOURCE_ONLY=1 source "$IMPL" || { bad "source guard missing"; exit 0; }
+  mk_rework_repo; BS="$(git rev-parse HEAD)"
+  # src/a.txt declared at 50 lines, no exception. Add 80 lines cumulatively
+  # since build start; region 40 → cap 120 so the scope cap does NOT fire,
+  # isolating the (b) per-file-bound check.
+  mkdir -p src; seq 1 80 > src/a.txt
+  git add -A; git commit -qm "rework: overshoots per-file bound" >/dev/null
+  NH="$(git rev-parse HEAD)"
+  out="$(_rework_pre_pass 0099-fix docs/tdd/0099-fix.md "$NH" "$BS" "$BS" 40)"; rc=$?
+  [ "$rc" -ne 0 ] && ok "pre-pass non-zero on over-bound file" || bad "over-bound should be non-zero"
+  printf '%s\n' "$out" | grep -qE 'PRECHECK_FAIL: structural-finding\(b\) src/a.txt' \
+    && ok "emits structural-finding(b) naming the file" || bad "should emit structural-finding(b) src/a.txt (got: $out)"
+) || true
+
+echo "[C7] _rework_pre_pass honors a declared (exception:) marker for (b)"
+( D="$ROOT/C7"; mkdir -p "$D/state.d"; cd "$D" || { bad "cd failed"; exit 0; }
+  export STATE_DIR="$D/state.d" STATE_STARTED_AT=1000 STATE_MODE="sequential"
+  export INTEGRATION="master" CHANGE="ci" LOGDIR="$D"
+  TDDS=()
+  THROUGHLINE_SOURCE_ONLY=1 source "$IMPL" || { bad "source guard missing"; exit 0; }
+  mk_rework_repo; BS="$(git rev-parse HEAD)"
+  # src/b.txt has (exception: …) at 200, so an 80-line add must NOT fire (b).
+  mkdir -p src; seq 1 80 > src/b.txt
+  git add -A; git commit -qm "rework: wide but declared-exception file" >/dev/null
+  NH="$(git rev-parse HEAD)"
+  out="$(_rework_pre_pass 0099-fix docs/tdd/0099-fix.md "$NH" "$BS" "$BS" 40)"; rc=$?
+  [ "$rc" -eq 0 ] && ok "exception file clears (b)" || bad "exception file should not fire (b) (rc=$rc, out=$out)"
+) || true
+
+echo "[C8] _rework_pre_pass falls back to build-start SHA when no cleared SHA"
+( D="$ROOT/C8"; mkdir -p "$D/state.d"; cd "$D" || { bad "cd failed"; exit 0; }
+  export STATE_DIR="$D/state.d" STATE_STARTED_AT=1000 STATE_MODE="sequential"
+  export INTEGRATION="master" CHANGE="ci" LOGDIR="$D"
+  TDDS=()
+  THROUGHLINE_SOURCE_ONLY=1 source "$IMPL" || { bad "source guard missing"; exit 0; }
+  mk_rework_repo; BS="$(git rev-parse HEAD)"
+  mkdir -p src; seq 1 200 > src/a.txt
+  git add -A; git commit -qm "rework: oversized, degraded mode" >/dev/null
+  NH="$(git rev-parse HEAD)"
+  # cleared SHA empty → §5 fallback to build-start SHA; scope cap still fires.
+  out="$(_rework_pre_pass 0099-fix docs/tdd/0099-fix.md "$NH" "" "$BS" 8)"; rc=$?
+  [ "$rc" -ne 0 ] && ok "degraded-mode pre-pass still enforces the cap" \
+    || bad "degraded mode should still reject oversized (rc=$rc, out=$out)"
+  printf '%s\n' "$out" | grep -q 'PRECHECK_FAIL: rework-scope-exceeded' \
+    && ok "fallback uses build-start SHA for the scope diff" || bad "should still emit scope-exceeded (got: $out)"
+) || true
+
 echo
 PASS="$(grep -c '^ok$'   "$RESULTS" 2>/dev/null)"; PASS="${PASS:-0}"
 FAIL="$(grep -c '^fail$' "$RESULTS" 2>/dev/null)"; FAIL="${FAIL:-0}"
