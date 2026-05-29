@@ -257,7 +257,7 @@ _resume_from() {
 # skips those gates. Each successfully-completed gate is recorded into
 # gates_completed via set_tdd_state's 5th param (TDD 0011 / FR-40).
 gate_one() {  # <tdd> <review-base-ref> <log>
-  local tdd="$1" rbase="$2" log="$3" bs rs rvs slug rrc _retries_json=""
+  local tdd="$1" rbase="$2" log="$3" bs rvs slug rrc _retries_json=""
   slug="$(basename "$tdd" .md)"
   # TDD 0019 carry-over fix 4 (TDD 0017 review): STATE_DIR is the resume entry's
   # one hard precondition — state_init sets it unconditionally. An unset

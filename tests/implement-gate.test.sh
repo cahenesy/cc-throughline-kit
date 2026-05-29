@@ -383,4 +383,25 @@ if [ -f "$GRM" ]; then
   bash "$GRM" || GRM_FAIL=1
 fi
 
-[ "$FAIL" -eq 0 ] && [ "$RPV_FAIL" -eq 0 ] && [ "$TSR_FAIL" -eq 0 ] && [ "$BTS_FAIL" -eq 0 ] && [ "$SMS_FAIL" -eq 0 ] && [ "$PRM_FAIL" -eq 0 ] && [ "$GRM_FAIL" -eq 0 ]
+# Run the bounded-rework-loop eval (TDD 0019 / FR-61, FR-62, FR-65, FR-66,
+# FR-67, FR-68) as part of the same suite — it exercises the rework loop's
+# config snapshot, telemetry, scope/structural pre-pass, and the gate_one
+# review-gate wiring, all runner-adjacent gate scaffolding.
+BRL="$(dirname "$0")/bounded-rework-loop.test.sh"
+BRL_FAIL=0
+if [ -f "$BRL" ]; then
+  echo
+  bash "$BRL" || BRL_FAIL=1
+fi
+
+# Run the run-recovery eval (TDD 0011 / FR-39..FR-45 + TDD 0019 carry-over
+# fail-loud fixes) as part of the same suite so the resume + carry-over
+# fixtures are gated by CI, not orphaned from the aggregator.
+RR="$(dirname "$0")/run-recovery.test.sh"
+RR_FAIL=0
+if [ -f "$RR" ]; then
+  echo
+  bash "$RR" || RR_FAIL=1
+fi
+
+[ "$FAIL" -eq 0 ] && [ "$RPV_FAIL" -eq 0 ] && [ "$TSR_FAIL" -eq 0 ] && [ "$BTS_FAIL" -eq 0 ] && [ "$SMS_FAIL" -eq 0 ] && [ "$PRM_FAIL" -eq 0 ] && [ "$GRM_FAIL" -eq 0 ] && [ "$BRL_FAIL" -eq 0 ] && [ "$RR_FAIL" -eq 0 ]
