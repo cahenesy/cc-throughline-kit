@@ -222,3 +222,135 @@ _review_one_gated() {  # <tdd> <rbase> <log>
   case "$rs" in *PASS*) return 0 ;; esac
   return 1
 }
+
+# === Bounded rework loop (TDD 0019 / FR-61, FR-62, FR-65, FR-66, FR-67) ========
+# The leaf functions the gate_one review gate drives when a review pass emits a
+# halting finding. _rework_one performs one bounded fix attempt on Sonnet;
+# _rework_pre_pass runs the mechanical FR-66 scope cap + FR-67(a)/(b) structural
+# checks against the rework commit's diff. All bounds are env-overridable (§6)
+# and snapshotted into run.json (_rework_config_json) so any halt is
+# reproducible from run-state alone (ADR 0006).
+
+# _rework_scope_cap <region-lines>  — echo the FR-66 cap = max(FLOOR,
+# FACTOR × region). An empty/non-numeric region collapses to the floor (the
+# pre-TDD-0021 degraded mode, before findings carry region_lines).
+_rework_scope_cap() {  # <region-lines>
+  local region="${1:-}"
+  local floor="${THROUGHLINE_REWORK_SCOPE_FLOOR:-60}"
+  local factor="${THROUGHLINE_REWORK_SCOPE_FACTOR:-3}"
+  case "$floor"  in ''|*[!0-9]*) floor=60 ;; esac
+  case "$factor" in ''|*[!0-9]*) factor=3 ;; esac
+  case "$region" in ''|*[!0-9]*) region=0 ;; esac
+  local scaled=$((factor * region))
+  if [ "$scaled" -gt "$floor" ]; then printf '%s' "$scaled"; else printf '%s' "$floor"; fi
+}
+
+# _rework_touched_files <tdd>  — echo the declared touched-file set (one path
+# per line) parsed from the TDD's `## Touched files` section (TDD 0014). Each
+# entry is the first backtick-delimited token on a `- ` bullet. Fence-aware so a
+# code block inside the section is ignored. Mirrors tdd-lint.sh's parser.
+_rework_touched_files() {  # <tdd>
+  local f="$1"
+  [ -f "$f" ] || return 0
+  awk '
+    BEGIN { in_fence=0; in_sec=0 }
+    /^[[:space:]]*```/ { in_fence = !in_fence; next }
+    !in_fence && /^## Touched files[[:space:]]*$/ { in_sec=1; next }
+    !in_fence && /^## / { in_sec=0; next }
+    in_sec && !in_fence && /^- / {
+      if (match($0, /`[^`]+`/)) print substr($0, RSTART+1, RLENGTH-2)
+    }
+  ' "$f"
+}
+
+# _rework_file_declared_bound <tdd> <file>  — echo "<lines> <exception?>" for
+# <file>'s entry in the TDD's `## Expected diff size` section (TDD 0014), where
+# <exception?> is 1 if an inline `(exception: …)` marker is present, else 0.
+# Echoes nothing when the file is not declared; <lines> is -1 when the estimate
+# is unparseable. Mirrors tdd-lint.sh check_per_file_diff_bound's awk.
+_rework_file_declared_bound() {  # <tdd> <file>
+  local f="$1" target="$2"
+  [ -f "$f" ] || return 0
+  awk -v TARGET="$target" '
+    BEGIN { in_fence=0; in_sec=0 }
+    /^[[:space:]]*```/ { in_fence = !in_fence; next }
+    !in_fence && /^## Expected diff size[[:space:]]*$/ { in_sec=1; next }
+    !in_fence && /^## / { in_sec=0; next }
+    in_sec && !in_fence && /^- / {
+      rest = substr($0, 3)
+      em = index(rest, "—")
+      if (em > 0) { file = substr(rest, 1, em - 1) }
+      else        { file = rest; sub(/[[:space:]].*/, "", file) }
+      gsub(/`/, "", file)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", file)
+      if (file == TARGET) {
+        n = -1
+        if (match(rest, /[0-9]+[[:space:]]*lines?/)) {
+          num = substr(rest, RSTART, RLENGTH); sub(/[^0-9].*/, "", num); n = num + 0
+        }
+        exc = (index(rest, "(exception:") > 0) ? 1 : 0
+        printf "%d %d\n", n, exc
+        exit
+      }
+    }
+  ' "$f"
+}
+
+# _rework_pre_pass <slug> <tdd> <new-head> <cleared-sha> <build-start-sha> <region-lines>
+# Run the three mechanical checks against the rework commit's diff. Emits one
+# `PRECHECK_FAIL: …` line per fired check (priority order: scope, then (a), then
+# (b) — the caller routes on the first line) and returns non-zero if any fired.
+#   FR-66 scope cap — total insertion+deletion over <cleared>..<new-head> vs
+#     max(FLOOR, FACTOR × region).
+#   FR-67(a) — any file in the diff outside the TDD's `## Touched files` set.
+#   FR-67(b) — any touched file whose cumulative <build-start>..<new-head> line
+#     count exceeds its `## Expected diff size` declaration (exception markers
+#     honored).
+# §Failure modes §5 / §Sequencing step 3: when <cleared-sha> is empty (TDD 0020
+# not yet landed), the scope/membership diff base falls back to <build-start-sha>
+# — a degraded but safe mode (bounds checked against the full TDD diff).
+_rework_pre_pass() {  # <slug> <tdd> <new-head> <cleared-sha> <build-start-sha> <region-lines>
+  local slug="$1" tdd="$2" new_head="$3" cleared="$4" build_start="$5" region="$6"
+  local base="$cleared"; [ -z "$base" ] && base="$build_start"
+  local fail=0 file
+
+  # FR-66 scope cap.
+  local cap span
+  cap="$(_rework_scope_cap "$region")"
+  span="$(git diff --numstat "$base..$new_head" 2>/dev/null | awk '{a+=$1; d+=$2} END{print a+d+0}')"
+  [ -z "$span" ] && span=0
+  if [ "$span" -gt "$cap" ] 2>/dev/null; then
+    printf 'PRECHECK_FAIL: rework-scope-exceeded %s > %s\n' "$span" "$cap"
+    fail=1
+  fi
+
+  # FR-67(a) touched-file scope.
+  local set_list
+  set_list="$(_rework_touched_files "$tdd")"
+  while IFS= read -r file; do
+    [ -z "$file" ] && continue
+    if ! printf '%s\n' "$set_list" | grep -qxF "$file"; then
+      printf 'PRECHECK_FAIL: structural-finding(a) %s\n' "$file"
+      fail=1
+    fi
+  done < <(git diff --name-only "$base..$new_head" 2>/dev/null)
+
+  # FR-67(b) per-file bound — cumulative since the build start (per §1).
+  local decl num exc actual
+  while IFS= read -r file; do
+    [ -z "$file" ] && continue
+    decl="$(_rework_file_declared_bound "$tdd" "$file")"
+    [ -z "$decl" ] && continue          # not declared → (a)'s concern, not (b)'s
+    num="${decl%% *}"; exc="${decl##* }"
+    [ "$exc" = "1" ] && continue        # declared exception → bound not enforced
+    [ "$num" -lt 0 ] 2>/dev/null && continue   # unparseable estimate → skip (b)
+    actual="$(git diff --numstat "$build_start..$new_head" -- "$file" 2>/dev/null | awk '{a+=$1; d+=$2} END{print a+d+0}')"
+    [ -z "$actual" ] && actual=0
+    if [ "$actual" -gt "$num" ] 2>/dev/null; then
+      printf 'PRECHECK_FAIL: structural-finding(b) %s %s > %s\n' "$file" "$actual" "$num"
+      fail=1
+    fi
+  done < <(git diff --name-only "$base..$new_head" 2>/dev/null)
+
+  return "$fail"
+}
