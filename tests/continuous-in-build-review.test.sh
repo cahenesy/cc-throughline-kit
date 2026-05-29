@@ -276,6 +276,32 @@ EOF
     && ok "review verdict still parsed from the log" || bad "review_one should still log the verdict"
 ) || true
 
+echo "[A7] cleared_step_log stays well-formed JSON across appends + carry-forward (FR-44; nested pattern_tags arrays)"
+( D="$ROOT/A7"; mkdir -p "$D/state.d"
+  export STATE_DIR="$D/state.d" STATE_STARTED_AT=1000 STATE_MODE="sequential"
+  export INTEGRATION="master" CHANGE="ci" LOGDIR="$D"
+  TDDS=()
+  THROUGHLINE_SOURCE_ONLY=1 source "$IMPL" || { bad "source guard missing"; exit 0; }
+  _write_tdd_fragment 0020-x 20 docs/tdd/0020-x.md 1 reviewing review \
+    1000 1000 "" "" log "" "" "" "" "" "" "" "" "" "" "" ""
+  _record_cleared_step 0020-x 1 base000 head111 "tag-a,tag-b"
+  _record_cleared_step 0020-x 2 head111 head222 "tag-c"
+  set_tdd_state 0020-x reviewing flip   # carry-forward must not corrupt the nested arrays
+  F="$D/state.d/0020-x.json"
+  if command -v jq >/dev/null 2>&1; then
+    jq -e . "$F" >/dev/null 2>&1 && ok "fragment is valid JSON after two appends + a carry-forward" \
+      || bad "fragment must stay valid JSON (got: $(cat "$F"))"
+    n="$(jq '.cleared_step_log | length' "$F" 2>/dev/null)"
+    [ "$n" = "2" ] && ok "cleared_step_log has exactly two entries" || bad "cleared_step_log should have two entries (got '$n')"
+    [ "$(jq -r '.cleared_step_log[1].pattern_tags[0]' "$F" 2>/dev/null)" = "tag-c" ] \
+      && ok "second entry's nested pattern_tags survive intact" || bad "nested pattern_tags should survive (got: $(_read_fragment_raw_array "$F" cleared_step_log 2>/dev/null))"
+  else
+    # Without jq, at least assert the structural bracket balance the corruption broke.
+    [ "$(grep -oF '[' "$F" | wc -l)" = "$(grep -oF ']' "$F" | wc -l)" ] \
+      && ok "bracket count balanced (no jq)" || bad "brackets unbalanced — cleared_step_log corrupted"
+  fi
+) || true
+
 echo
 PASS="$(grep -c '^ok$'   "$RESULTS" 2>/dev/null)"; PASS="${PASS:-0}"
 FAIL="$(grep -c '^fail$' "$RESULTS" 2>/dev/null)"; FAIL="${FAIL:-0}"
