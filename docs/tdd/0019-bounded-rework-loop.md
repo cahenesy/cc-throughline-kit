@@ -1,6 +1,6 @@
 # TDD 0019: Bounded automatic rework loop — model wiring, attempt budget, scope cap, structural escalation, cost telemetry
 
-Status: draft
+Status: implemented
 PRD refs: FR-61, FR-62, FR-65, FR-66, FR-67, FR-68
 PRD-rev: a961955
 ADR constraints: 0003, 0004, 0005, 0006, 0007
