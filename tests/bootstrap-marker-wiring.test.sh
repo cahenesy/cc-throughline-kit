@@ -238,6 +238,33 @@ echo "[J] completion block fails loudly when a helper cannot be sourced"
   fi
 ) || bad "[J] source-failure case aborted before recording a verdict"
 
+# --- [K] a repo-marker write failure must abort the block (no false success) -
+# The repo marker is FR-31's source of truth for re-run short-circuiting. If
+# tl_repo_marker_write fails, the block must NOT march on to write the local
+# marker and exit 0 — that leaves "local seen, repo absent", silently breaking
+# idempotency. It must surface the failure with a non-zero exit.
+echo "[K] a failed repo-marker write aborts the completion block"
+( blk="$(extract_completion_block)"
+  if [ -z "$blk" ]; then
+    bad "[K] no completion block to run"
+  else
+    R="$(mkrepo "$ROOT/k")"; DATA="$ROOT/k-data"
+    blk="${blk//<language>/shell}"; blk="${blk//<steps-csv>/scaffold}"
+    printf '%s' "$blk" > "$ROOT/k.sh"
+    # A regular file named 'docs' blocks `mkdir -p docs`, so the repo-marker
+    # write fails while the local-marker write (writable DATA) would succeed.
+    : > "$R/docs"
+    ( cd "$R" && CLAUDE_PLUGIN_ROOT="$REPO" CLAUDE_PLUGIN_DATA="$DATA" bash "$ROOT/k.sh" ) >/dev/null 2>&1
+    rc=$?
+    f="$R/docs/.throughline-bootstrap.json"
+    if [ "$rc" -ne 0 ] && [ ! -f "$f" ]; then
+      ok "block exits non-zero (no false success) when the repo-marker write fails"
+    else
+      bad "block reported success despite a failed repo-marker write (rc=$rc)"
+    fi
+  fi
+) || bad "[K] repo-marker-failure case aborted before recording a verdict"
+
 echo
 PASS="$(grep -c '^ok$'   "$RESULTS" 2>/dev/null)"; PASS="${PASS:-0}"
 FAIL="$(grep -c '^fail$' "$RESULTS" 2>/dev/null)"; FAIL="${FAIL:-0}"
