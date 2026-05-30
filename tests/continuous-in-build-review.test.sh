@@ -615,6 +615,63 @@ EOF
     || bad "step 5: review_one (consolidated) should see step1's recorded pattern_tag"
 ) || true
 
+# --- TDD 0024 / FR-40: structured cleared-step RESUME SIGNAL -----------------
+echo "[F1] _cleared_steps_csv + {{CLEARED_STEPS}} render: none on a fresh build, CSV of cleared step_ids on resume"
+( D="$ROOT/F1"; mkdir -p "$D/state.d"
+  export STATE_DIR="$D/state.d" STATE_STARTED_AT=1000 STATE_MODE="sequential"
+  export INTEGRATION="master" CHANGE="ci" LOGDIR="$D"
+  TDDS=()
+  THROUGHLINE_SOURCE_ONLY=1 source "$IMPL" || { bad "source guard missing"; exit 0; }
+
+  # Fresh build: empty cleared_step_log -> "none".
+  _write_tdd_fragment 0024-fresh 24 docs/tdd/0024-fresh.md 1 building build \
+    1000 1000 "feat/0024-fresh" "" "log" "" "" "" "" "" \
+    "" "" "" "" "" "" "" "" "[]"
+  out="$(_cleared_steps_csv 0024-fresh)"
+  [ "$out" = "none" ] && ok "_cleared_steps_csv -> none for an empty cleared_step_log" \
+    || bad "_cleared_steps_csv should be 'none' on empty (got '$out')"
+
+  # Missing fragment -> "none".
+  out="$(_cleared_steps_csv 0024-absent)"
+  [ "$out" = "none" ] && ok "_cleared_steps_csv -> none when the fragment is missing" \
+    || bad "_cleared_steps_csv should be 'none' for a missing fragment (got '$out')"
+
+  # Resume: a populated cleared_step_log -> CSV of step_ids (deduped, in record order).
+  _write_tdd_fragment 0024-resume 24 docs/tdd/0024-resume.md 1 building build \
+    1000 1000 "feat/0024-resume" "" "log" "" "" "" "" "" \
+    "" "" "" "" "" "" "" "ccc" \
+    '[{"step_id":1,"base_sha":"a","head_sha":"b","pattern_tags":[],"cleared_at":1},{"step_id":2,"base_sha":"b","head_sha":"c","pattern_tags":[],"cleared_at":2},{"step_id":4,"base_sha":"c","head_sha":"ccc","pattern_tags":[],"cleared_at":3}]'
+  out="$(_cleared_steps_csv 0024-resume)"
+  [ "$out" = "1,2,4" ] && ok "_cleared_steps_csv -> CSV of cleared step_ids" \
+    || bad "_cleared_steps_csv should be '1,2,4' (got '$out')"
+
+  # The build prompt declares the placeholder. (TMPL is only set in real-run
+  # mode, so reference the file path directly — as _render_build_prompt's own
+  # fallback does.)
+  grep -q '{{CLEARED_STEPS}}' "$REPO/scripts/build-prompt.md" \
+    && ok "build-prompt.md declares the {{CLEARED_STEPS}} placeholder" \
+    || bad "build-prompt.md should carry a {{CLEARED_STEPS}} placeholder"
+
+  # Render-time substitution (the path _per_step_review_loop uses): fresh -> none.
+  rendered_fresh="$(_render_build_prompt 0024-fresh docs/tdd/0024-fresh.md)"
+  printf '%s' "$rendered_fresh" | grep -q '{{CLEARED_STEPS}}' \
+    && bad "fresh render still contains the literal {{CLEARED_STEPS}} placeholder" \
+    || ok "fresh render substitutes the placeholder"
+  printf '%s' "$rendered_fresh" | grep -qE 'Cleared steps from any prior attempt: none' \
+    && ok "fresh render shows 'none'" \
+    || bad "fresh render should show the RESUME SIGNAL bullet with 'none'"
+
+  # Render-time substitution: resume -> the CSV.
+  rendered_resume="$(_render_build_prompt 0024-resume docs/tdd/0024-resume.md)"
+  printf '%s' "$rendered_resume" | grep -qE 'Cleared steps from any prior attempt: 1,2,4' \
+    && ok "resume render shows the cleared step CSV (1,2,4)" \
+    || bad "resume render should show 'Cleared steps from any prior attempt: 1,2,4'"
+  # The {{TDD}} placeholder is still substituted alongside (no regression).
+  printf '%s' "$rendered_resume" | grep -q 'docs/tdd/0024-resume.md' \
+    && ok "render still substitutes {{TDD}} alongside {{CLEARED_STEPS}}" \
+    || bad "render must still substitute {{TDD}}"
+) || true
+
 echo
 PASS="$(grep -c '^ok$'   "$RESULTS" 2>/dev/null)"; PASS="${PASS:-0}"
 FAIL="$(grep -c '^fail$' "$RESULTS" 2>/dev/null)"; FAIL="${FAIL:-0}"
