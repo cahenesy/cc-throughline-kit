@@ -45,7 +45,10 @@ tl_repo_id() {
   # absolute toplevel path. sha256 operates on bytes, so any path encodes.
   src="$(git -C "$toplevel" remote get-url origin 2>/dev/null)"
   [ -n "$src" ] || src="$toplevel"
-  digest="$(printf '%s' "$src" | _tl_sha256_hex)" \
+  # `set -o pipefail` scoped to this subshell so a failure in ANY pipeline stage
+  # (not just the last) propagates — defense-in-depth against pipeline masking,
+  # on top of _tl_sha256_hex's direct capture and the digest validation below.
+  digest="$(set -o pipefail; printf '%s' "$src" | _tl_sha256_hex)" \
     || { echo "tl_repo_id: need sha256sum or shasum to derive a repo id" >&2; return 1; }
   # Fail closed: a short/empty/non-hex digest must never silently truncate to a
   # bogus id. Require at least 12 lowercase hex chars before slicing.
