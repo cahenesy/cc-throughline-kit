@@ -354,6 +354,36 @@ echo "[N] short-circuit re-apply fails loudly when gitignore.sh cannot be source
   fi
 ) || bad "[N] short-circuit source-failure case aborted before recording a verdict"
 
+# --- [O] a failed .gitignore write must abort the completion block ------------
+# FR-32's ignore entry is a required step (TDD: "the marker steps are NOT
+# optional"). If tl_gitignore_add_line fails but its return value is unchecked,
+# the block marches on to write the repo marker and reports success — leaving
+# bootstrap "complete" with docs/tdd/.implement-logs/ UN-ignored, which fails
+# TDD 0009 verification step 3 (git check-ignore must exit 0). The block must
+# abort (non-zero, no repo marker) when the ignore write fails.
+echo "[O] a failed .gitignore write aborts the completion block (no false success)"
+( blk="$(extract_completion_block)"
+  if [ -z "$blk" ]; then
+    bad "[O] no completion block to run"
+  else
+    R="$(mkrepo "$ROOT/o")"; DATA="$ROOT/o-data"
+    blk="${blk//<language>/shell}"; blk="${blk//<steps-csv>/scaffold}"
+    printf '%s' "$blk" > "$ROOT/o.sh"
+    # A DIRECTORY named .gitignore makes the helper's `>> .gitignore` append fail
+    # (so tl_gitignore_add_line returns non-zero) while the repo-marker write to
+    # docs/ would otherwise succeed.
+    mkdir "$R/.gitignore"
+    ( cd "$R" && CLAUDE_PLUGIN_ROOT="$REPO" CLAUDE_PLUGIN_DATA="$DATA" bash "$ROOT/o.sh" ) >/dev/null 2>&1
+    rc=$?
+    f="$R/docs/.throughline-bootstrap.json"
+    if [ "$rc" -ne 0 ] && [ ! -f "$f" ]; then
+      ok "block exits non-zero and writes no marker when the .gitignore write fails"
+    else
+      bad "block marked itself complete despite a failed .gitignore write (rc=$rc, marker present=$([ -f "$f" ] && echo yes || echo no))"
+    fi
+  fi
+) || bad "[O] gitignore-write-failure case aborted before recording a verdict"
+
 echo
 PASS="$(grep -c '^ok$'   "$RESULTS" 2>/dev/null)"; PASS="${PASS:-0}"
 FAIL="$(grep -c '^fail$' "$RESULTS" 2>/dev/null)"; FAIL="${FAIL:-0}"
