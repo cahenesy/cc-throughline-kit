@@ -184,12 +184,16 @@ echo "[I] Step 0 reads plugin_version_applied without depending on jq"
     ( cd "$R" && source "$REPO/scripts/lib/repo-id.sh" \
         && source "$REPO/scripts/lib/markers.sh" \
         && tl_repo_marker_write 9.9.9 shell scaffold ) >/dev/null 2>&1
-    # An always-failing `jq` earlier on PATH stands in for a jq-absent machine:
-    # any read that pipes through jq yields empty; a sed/grep read still works.
+    # Curated PATH with the real tools the Step 0 read needs but NO jq (and no
+    # python3) — a faithful jq-absent machine. markers.sh's read validation then
+    # takes the assume-valid path and returns the JSON, so the ONLY thing that
+    # can fail is a jq-dependent field extraction. A sed/grep read still works.
     BIN="$ROOT/i-bin"; mkdir -p "$BIN"
-    printf '#!/usr/bin/env bash\nexit 1\n' > "$BIN/jq"; chmod +x "$BIN/jq"
+    for t in bash git cat sed head grep printf; do
+      p="$(command -v "$t")" && [ -n "$p" ] && ln -sf "$p" "$BIN/$t"
+    done
     { printf '%s\n' "$blk"; printf 'printf "APPLIED=%%s\\n" "$applied"\n'; } > "$ROOT/i.sh"
-    out="$( cd "$R" && CLAUDE_PLUGIN_ROOT="$REPO" PATH="$BIN:$PATH" bash "$ROOT/i.sh" 2>/dev/null )"
+    out="$( cd "$R" && CLAUDE_PLUGIN_ROOT="$REPO" PATH="$BIN" bash "$ROOT/i.sh" 2>/dev/null )"
     if printf '%s\n' "$out" | grep -Fxq 'APPLIED=9.9.9'; then
       ok "Step 0 recovered plugin_version_applied=9.9.9 with jq disabled"
     else

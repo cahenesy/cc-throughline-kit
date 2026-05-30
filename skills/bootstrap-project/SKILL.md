@@ -20,11 +20,15 @@ repo marker (from the repo root):
 ```bash
 source "${CLAUDE_PLUGIN_ROOT}/scripts/lib/repo-id.sh"
 source "${CLAUDE_PLUGIN_ROOT}/scripts/lib/markers.sh"
-applied="$(tl_repo_marker_read | jq -r '.plugin_version_applied // empty' 2>/dev/null)"
-language="$(tl_repo_marker_read | jq -r '.language // empty' 2>/dev/null)"
+marker="$(tl_repo_marker_read)"   # the marker JSON, or "{}" if absent/malformed
+applied="$(printf '%s\n' "$marker" | sed -n 's/.*"plugin_version_applied"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1)"
+language="$(printf '%s\n' "$marker" | sed -n 's/.*"language"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1)"
 ```
 
-(If `jq` is unavailable, read the two fields out of the JSON yourself.)
+These reads use `sed`, not `jq`: FR-31's re-run short-circuit must work on
+machines without `jq` (only the post-update hook's local notice is `jq`-gated).
+The marker's string fields are written one-per-line by `tl_repo_marker_write`,
+so a line-oriented `sed` extraction is exact.
 
 If `$applied` is **non-empty**, this repo is already bootstrapped. Print exactly
 one line:
