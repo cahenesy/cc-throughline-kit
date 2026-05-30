@@ -53,7 +53,13 @@ greenfield/brownfield flow, and do NOT rewrite the marker — it must stay
 byte-identical on a re-run. Re-apply ONLY the cheap, idempotent steps:
 
 ```bash
-source "${CLAUDE_PLUGIN_ROOT}/scripts/lib/gitignore.sh"
+# Guard the source for the same reason as Step 0's reads above: an unguarded
+# source under a misconfigured CLAUDE_PLUGIN_ROOT turns tl_gitignore_add_line
+# into a "command not found" no-op, silently dropping the .gitignore re-apply.
+source "${CLAUDE_PLUGIN_ROOT}/scripts/lib/gitignore.sh" || {
+  echo "bootstrap: could not source scripts/lib/gitignore.sh from \${CLAUDE_PLUGIN_ROOT} — cannot re-apply the .gitignore entry; fix the plugin path and re-run" >&2
+  return 1 2>/dev/null || exit 1
+}
 tl_gitignore_add_line "docs/tdd/.implement-logs/"
 ```
 
