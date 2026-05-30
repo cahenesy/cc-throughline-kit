@@ -450,8 +450,16 @@ _per_step_review_loop() {  # <slug> <tdd> <log>
   local prompt build_start inter overall model errlog start
   # TDD 0024 / FR-40: render the build prompt with the {{CLEARED_STEPS}} RESUME
   # SIGNAL (cleared step IDs from a prior attempt, or `none` for a fresh build)
-  # substituted alongside {{TDD}}.
-  prompt="$(_render_build_prompt "$slug" "$tdd")"
+  # substituted alongside {{TDD}}. Capture the render rc separately so a
+  # template-missing failure (rc=1, stderr-only diagnostic) does NOT silently
+  # produce an empty prompt + bogus `claude -p ""` + misleading "no
+  # BATCH_RESULT" FAIL; the gate log must carry an in-band diagnostic so a
+  # triage opening the durable artifact sees the cause (review-rerun-1 MAJOR-1).
+  prompt="$(_render_build_prompt "$slug" "$tdd" 2>>"$log")"
+  if [ $? -ne 0 ] || [ -z "$prompt" ]; then
+    echo "FATAL: _per_step_review_loop: build prompt render failed for $slug; refusing to spawn claude -p with an empty prompt" >>"$log"
+    return 1
+  fi
   build_start="$(git rev-parse HEAD 2>/dev/null || echo "")"
   inter="${THROUGHLINE_BUILD_INTER_EVENT_TIMEOUT:-600}"; case "$inter" in ''|*[!0-9]*) inter=600 ;; esac
   overall="${THROUGHLINE_BUILD_TIMEOUT:-7200}"
