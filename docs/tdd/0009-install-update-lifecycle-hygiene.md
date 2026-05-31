@@ -1,6 +1,6 @@
 # TDD 0009: Install/update lifecycle hygiene
 
-Status: draft
+Status: implemented
 PRD refs: FR-31, FR-32, FR-33, FR-34, FR-35 (new)
 PRD-rev: f73f2b2
 ADR constraints: 0003, 0004
