@@ -15,6 +15,14 @@ Build discipline:
   work from the killed attempt. Extend or repair on top — do NOT rewrite
   history (the divergence guard rejects rewrites) — then emit its
   `STEP_COMMIT:` sentinel.
+- RESUME-COMPLETION CASE. If on entry you find that `{{CLEARED_STEPS}}` already
+  covers every Sequencing item in the TDD (no work remains), your ONLY task
+  this run is to emit `BATCH_RESULT: OK` as your final line. The runner does
+  NOT infer build-done from the cleared list — you MUST declare it. Skip the
+  per-step handshake (no STEP_COMMIT, no commit, no edits); just emit the
+  sentinel and end the turn. A prose-only "build is complete" message without
+  `BATCH_RESULT: OK` will be classified as a build failure even though the
+  per-step reviews already validated the work.
 - Implement in the sequence the TDD specifies, one step at a time.
 - AT THE END OF EACH NUMBERED Sequencing item in the TDD, before starting the
   next item, you MUST do the following four-step handshake with the runner
